@@ -33,13 +33,13 @@ Tracks A and B are independent (no blockers between them). Track C depends on A.
 | 4 | keeperhub-rs: implement `get_execution_logs` | A | P0 | S | #2 |
 | 5 | keeperhub-rs: x402 challenge parser + thin wallet-client wrapper | A | P0 | S | #1 |
 | 6 | keeperhub-rs: `call_paid_workflow` via wallet MCP | A | P0 | S | #3, #5 |
-| 7 | `keeperhub-rs`: Aave direct call via `execute_protocol_action` | A | P0 | S | #1, Aave integration |
+| 7 | `keeperhub-rs`: Aave direct call via `execute_protocol_action` | A | P0 | S | #1 |
 | 7b | Build + publish one marketplace workflow (visual builder) | B | P0 | M | #1 |
-| 8 | `keeperhub-rs`: Morpho direct call via `execute_protocol_action` + HF calc | A | P0 | S | #1, Morpho integration |
+| 8 | `keeperhub-rs`: Morpho direct call via `execute_protocol_action` + HF calc | A | P0 | S | #1 |
 | 9 | moltbot: agent loop skeleton (60s tick) | C | P0 | M | #2 |
 | 10 | moltbot: yield strategy (call Aave, parse) | C | P0 | M | #6, #7, #9 |
 | 11 | moltbot: job system + Morpho impl | C | P0 | L | #6, #8, #9 |
-| 11b | Configure Aave V3 + Morpho integrations in KeeperHub | ops | P0 | S | #1 |
+| 11b | ~~Configure Aave V3 + Morpho integrations in KeeperHub~~ | ops | ~~P0~~ | ~~S~~ | — |
 | 12 | moltbot: safe-mode (low-balance detection) | C | P0 | S | #9 |
 | 13 | keeperhub-rs: implement `search_workflows` | A | P1 | S | #2 |
 | 14 | moltbot: SQLite audit log | C | P1 | M | #9 |
@@ -388,25 +388,15 @@ Save as `plans/daily/<date>.md` if you want a record.
 
 ---
 
-### #11b — Configure Aave V3 + Morpho integrations in KeeperHub
+### #11b — ~~Configure Aave V3 + Morpho integrations in KeeperHub~~  **OBSOLETE**
 
-**Track:** ops · **Priority:** P0 · **Estimate:** S (15 min) · **Depends on:** #1
+**Status:** Removed from the active plan on 2026-07-03. Kept here for history.
 
-**Why:** `execute_protocol_action` with `requiresCredentials: true` (Aave, Morpho) won't work until the org-level integration is configured. One-time setup.
+**Why obsolete:** Aave V3 and Morpho are **plugins**, not integration types. The KeeperHub `/api/integrations` endpoint supports 9 types — `discord`, `slack`, `telegram`, `sendgrid`, `resend`, `safe`, `webhook`, `web3`, `ai-gateway` — and Aave/Morpho are not in that list. Aave's plugin doc confirms: write actions require a **Wallet** credential (i.e. the existing web3 integration), no separate plugin integration is needed.
 
-**What to do:**
-- In KeeperHub app: Integrations → Add → search "Aave V3" → connect
-- Same for Morpho
-- Verify with `list_integrations` MCP tool — both should appear
-- Note the integration IDs in `keeperhub-docs-summary.md`
+**Implication:** the existing web3 wallet integration (`0dwxj2y2d756x9fda5hjm`, the creator wallet from setup B2) is the only integration MoltBot needs. #7, #8, #10, and #11 no longer depend on #11b. We can proceed directly.
 
-**Acceptance criteria:**
-- [ ] Aave V3 integration is configured
-- [ ] Morpho integration is configured
-- [ ] `list_integrations` shows both
-- [ ] A test call to `execute_protocol_action("aave-v3/get-user-account-data", ...)` returns successfully
-
-**Done =** Aave + Morpho integrations live in the org. Required for #7, #8, #10, #11.
+**Why we thought it was needed:** the handoff (and the handoff to the handoff) said "configure Aave V3 and Morpho integrations" based on an assumption that protocol actions had per-protocol credentials. Confirmed wrong against the live `/api/integrations` schema.
 
 ---
 

@@ -160,6 +160,8 @@ Workflows with execution history cannot be deleted via the API ("Delete executio
 
 **Strategic simplification for #7/#8:** `execute_protocol_action` can replace building the Aave/Morpho workflows in the visual builder for our own yield strategy. Visual-builder workflows are still needed for #25-28 (bounty publish) and for any workflow we want to *charge* others to call. **Worth discussing at #7.**
 
+**Architectural note (2026-07-03):** Aave V3 and Morpho are **plugins**, not integration types. The `/api/integrations` endpoint supports 9 types — `discord`, `slack`, `telegram`, `sendgrid`, `resend`, `safe`, `webhook`, `web3`, `ai-gateway` — and Aave/Morpho are not in that list. Aave's plugin doc (`/plugins/aave-v3`) confirms: write actions need a **Wallet** credential, meaning the existing web3 integration. **No per-protocol integration step is required.** The org's single web3 wallet integration (`0dwxj2y2d756x9fda5hjm`) covers Aave + Morpho + every other protocol plugin. This made plan #11b (configure Aave/Morpho integrations) obsolete — removed on 2026-07-03.
+
 ### 5.2 Per-workflow MCP servers
 
 Every listed marketplace workflow gets its own MCP server at `/mcp/w/<slug>`. The agent sees a *typed tool* (single decision step) instead of a generic `call_workflow(slug, inputs)` dispatcher. **Important for tool-picking accuracy.**
