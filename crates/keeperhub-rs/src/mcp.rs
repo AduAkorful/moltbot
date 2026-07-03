@@ -41,7 +41,7 @@
 //! and the session is reused until it expires or the server returns 401.
 
 use crate::error::{Error, Result};
-use crate::types::{CallWorkflowResult, Workflow};
+use crate::types::{CallWorkflowResult, ExecutionDetail, Workflow};
 use crate::x402::parse_challenge;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -192,6 +192,58 @@ impl McpClient {
             }
             Err(other) => Err(other),
         }
+    }
+
+    /// Fetch the full execution record + status summary for a previous
+    /// workflow execution.
+    ///
+    /// This is the audit-trail retrieval tool. After calling
+    /// [`McpClient::execute_workflow`] (or running a free workflow via
+    /// [`McpClient::call_workflow`]), poll this method to get the
+    /// per-node statuses, the final output, any onchain transaction
+    /// hashes, and the audit trail (trigger source, who triggered it,
+    /// the workflow hash at execution time, etc.).
+    ///
+    /// The returned [`ExecutionDetail`] combines the `status` envelope
+    /// and the full `execution` record (the API's `logs` wrapper is
+    /// flattened for ergonomics).
+    pub async fn get_execution(&self, execution_id: &str) -> Result<ExecutionDetail> {
+        let text = self
+            .tools_call_text(
+                "get_execution",
+                json!({ "executionId": execution_id }),
+            )
+            .await?;
+        flatten_logs_envelope(&text)
+    }
+
+    /// Manually trigger a workflow's execution. Returns the execution ID
+    /// for status polling.
+    ///
+    /// Note: this is for workflows in your own org, called directly by
+    /// ID (not by slug from the marketplace). For marketplace workflows,
+    /// use [`McpClient::call_workflow`].
+    pub async fn execute_workflow(&self, workflow_id: &str) -> Result<String> {
+        let text = self
+            .tools_call_text(
+                "execute_workflow",
+                json!({ "workflowId": workflow_id }),
+            )
+            .await?;
+        let parsed: Value = serde_json::from_str(&text).map_err(|e| {
+            Error::Internal(format!(
+                "execute_workflow({workflow_id}): failed to parse response: {e}; body: {text}"
+            ))
+        })?;
+        parsed
+            .get("executionId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                Error::Mcp(format!(
+                    "execute_workflow({workflow_id}): response missing executionId; body: {text}"
+                ))
+            })
     }
 
     /// Initialize the MCP session (handshake).
@@ -463,6 +515,33 @@ fn extract_challenge_from_402(message: &str) -> Option<crate::types::PaymentChal
     parse_challenge(json_str).ok()
 }
 
+/// Flatten the `get_execution` response from `{ status, logs: { execution } }`
+/// to `{ status, execution }` for ergonomic deserialization into
+/// [`ExecutionDetail`].
+fn flatten_logs_envelope(text: &str) -> Result<crate::types::ExecutionDetail> {
+    let mut v: Value = serde_json::from_str(text).map_err(|e| {
+        Error::Internal(format!(
+            "get_execution: response is not valid JSON: {e}; body: {text}"
+        ))
+    })?;
+    if let Some(logs) = v.get_mut("logs").and_then(|l| l.as_object_mut()) {
+        if let Some(exec) = logs.remove("execution") {
+            v.as_object_mut()
+                .ok_or_else(|| {
+                    Error::Internal(format!(
+                        "get_execution: response is not a JSON object; body: {text}"
+                    ))
+                })?
+                .insert("execution".to_string(), exec);
+        }
+    }
+    serde_json::from_value(v).map_err(|e| {
+        Error::Internal(format!(
+            "get_execution: failed to parse response as ExecutionDetail: {e}; body: {text}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,5 +616,26 @@ mod tests {
     fn extract_challenge_from_402_rejects_malformed_json() {
         let msg = "API call failed: 402 Payment Required - not json at all";
         assert!(extract_challenge_from_402(msg).is_none());
+    }
+
+    #[test]
+    fn flatten_logs_envelope_lifts_execution() {
+        let body = r#"{
+            "status": { "status": "success" },
+            "logs": { "execution": { "id": "abc", "workflowId": "wf1", "status": "success" } }
+        }"#;
+        let detail = flatten_logs_envelope(body).unwrap();
+        assert_eq!(detail.status.status, crate::types::ExecutionStatus::Success);
+        assert_eq!(detail.execution.id, "abc");
+        assert_eq!(detail.execution.workflow_id, "wf1");
+    }
+
+    #[test]
+    fn flatten_logs_envelope_handles_missing_logs() {
+        let body = r#"{ "status": { "status": "failed" } }"#;
+        // The Execution will fail to deserialize (missing required fields)
+        // but we should at least handle the parse and surface a clear error.
+        let err = flatten_logs_envelope(body).unwrap_err();
+        assert!(matches!(err, Error::Internal(_)));
     }
 }

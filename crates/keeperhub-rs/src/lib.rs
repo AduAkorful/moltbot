@@ -44,5 +44,8 @@ pub use mcp::McpClient;
 pub mod prelude {
     pub use crate::error::{Error, Result};
     pub use crate::mcp::McpClient;
-    pub use crate::types::{CallWorkflowResult, Execution, ExecutionStatus, Workflow};
+    pub use crate::types::{
+        CallWorkflowResult, Execution, ExecutionDetail, ExecutionStatus, ExecutionStatusSummary,
+        ExecutionTxHash, Workflow,
+    };
 }

@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+
 /// A KeeperHub workflow.
 ///
 /// Workflows are the unit of automation. Each has triggers, actions, and
@@ -211,7 +212,7 @@ pub enum ExecutionStatus {
     Running,
     /// Completed successfully.
     Completed,
-    /// Completed successfully (alias returned by some endpoints).
+    /// Completed successfully (alias returned by `get_execution`).
     Success,
     /// Failed (check logs for the error).
     Failed,
@@ -227,13 +228,110 @@ impl ExecutionStatus {
             Self::Completed | Self::Success | Self::Failed | Self::Cancelled
         )
     }
+
+    /// Returns `true` if the execution finished without error.
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Completed | Self::Success)
+    }
 }
 
-/// A single execution of a workflow.
+/// The full audit-trail response from `get_execution`.
+///
+/// Returned by [`crate::mcp::McpClient::get_execution`]. Combines a
+/// status summary with the full execution record.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionDetail {
+    /// High-level status summary (status, per-node statuses, progress).
+    pub status: ExecutionStatusSummary,
+
+    /// The full execution record: input, output, audit trail.
+    /// (The API wraps this in a `logs` envelope; the wrapper is
+    /// flattened on deserialization for ergonomics.)
+    pub execution: Execution,
+}
+
+/// The `status` half of the `get_execution` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionStatusSummary {
+    /// Top-level status.
+    pub status: ExecutionStatus,
+
+    /// Per-node status (one per workflow node that ran).
+    #[serde(default)]
+    pub node_statuses: Vec<NodeStatus>,
+
+    /// Progress metadata.
+    #[serde(default)]
+    pub progress: Option<ExecutionProgress>,
+
+    /// Transaction hashes produced so far (may include pre-completion
+    /// hashes while a multi-node execution is still running).
+    #[serde(default)]
+    pub transaction_hashes: Vec<ExecutionTxHash>,
+
+    /// Optional error context when the execution failed.
+    #[serde(default)]
+    pub error_context: Option<serde_json::Value>,
+}
+
+/// Status of a single node within an execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeStatus {
+    /// The node ID within the workflow.
+    pub node_id: String,
+
+    /// Node status (`"success"`, `"running"`, `"failed"`, etc.).
+    pub status: String,
+}
+
+/// Progress metadata for an execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionProgress {
+    /// Total number of steps in the workflow (if known).
+    #[serde(default)]
+    pub total_steps: Option<u32>,
+    /// Number of steps that have completed.
+    #[serde(default)]
+    pub completed_steps: u32,
+    /// Number of steps currently running.
+    #[serde(default)]
+    pub running_steps: u32,
+    /// The node currently executing.
+    #[serde(default)]
+    pub current_node_id: Option<String>,
+    /// The display name of the node currently executing.
+    #[serde(default)]
+    pub current_node_name: Option<String>,
+    /// Progress as a 0-100 percentage.
+    #[serde(default)]
+    pub percentage: u32,
+}
+
+/// A transaction hash produced by an execution, attributed to a node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionTxHash {
+    /// The transaction hash (0x...).
+    pub hash: String,
+
+    /// The node that produced this tx.
+    #[serde(default)]
+    pub node_id: Option<String>,
+
+    /// Human-readable node name.
+    #[serde(default)]
+    pub node_name: Option<String>,
+}
+
+/// A single execution of a workflow — the full audit record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Execution {
-    /// Unique execution ID.
+    /// Unique execution ID (a base62 string from the API).
     pub id: String,
 
     /// The workflow that was executed.
@@ -242,35 +340,104 @@ pub struct Execution {
     /// Current status.
     pub status: ExecutionStatus,
 
+    /// Inputs to the execution (workflow-trigger inputs).
+    #[serde(default)]
+    pub input: serde_json::Value,
+
+    /// Output of the execution (workflow final-node output).
+    #[serde(default)]
+    pub output: serde_json::Value,
+
+    /// Error message if the execution failed.
+    #[serde(default)]
+    pub error: Option<String>,
+
+    /// Error category (e.g. `"TIMEOUT"`, `"RPC_ERROR"`).
+    #[serde(default)]
+    pub error_category: Option<String>,
+
+    /// Error type (e.g. `"network"`).
+    #[serde(default)]
+    pub error_type: Option<String>,
+
+    /// Numeric error code.
+    #[serde(default)]
+    pub error_code: Option<String>,
+
     /// When the execution started.
     #[serde(default)]
     pub started_at: Option<DateTime<Utc>>,
 
     /// When the execution ended (if terminal).
     #[serde(default)]
-    pub ended_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
 
-    /// Transaction hashes produced by this execution (for web3 actions).
+    /// Duration string (e.g. `"400"` for 400ms). String per the API.
     #[serde(default)]
-    pub tx_hashes: Vec<String>,
+    pub duration: Option<String>,
 
-    /// Total gas used (in wei) across all transactions.
+    /// KeeperHub run ID (different from the MCP execution ID).
     #[serde(default)]
-    pub gas_used: Option<String>,
-}
+    pub run_id: Option<String>,
 
-/// Detailed logs for an execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionLogs {
-    /// The execution these logs belong to.
-    pub execution_id: String,
+    /// Transaction hashes produced by this execution.
+    #[serde(default)]
+    pub transaction_hashes: Vec<ExecutionTxHash>,
 
-    /// Structured log entries (one per node).
-    pub entries: Vec<LogEntry>,
+    /// Total gas used across all transactions (in wei).
+    #[serde(default)]
+    pub gas_used_wei: Option<String>,
+
+    /// Whether this execution counts against the org's monthly quota.
+    #[serde(default)]
+    pub billable: Option<bool>,
+
+    /// What triggered this execution (`"manual"`, `"schedule"`, etc.).
+    #[serde(default)]
+    pub trigger_source: Option<String>,
+
+    /// Org API key that triggered the execution (if applicable).
+    #[serde(default)]
+    pub triggered_by_org_api_key_id: Option<String>,
+
+    /// User API key that triggered the execution (if applicable).
+    #[serde(default)]
+    pub triggered_by_user_api_key_id: Option<String>,
+
+    /// Type of credential that triggered the execution.
+    #[serde(default)]
+    pub triggered_by_credential_type: Option<String>,
+
+    /// Ordered list of node IDs that ran.
+    #[serde(default)]
+    pub execution_trace: Option<Vec<String>>,
+
+    /// Last node that completed successfully.
+    #[serde(default)]
+    pub last_successful_node_id: Option<String>,
+
+    /// Last node's display name.
+    #[serde(default)]
+    pub last_successful_node_name: Option<String>,
+
+    /// Hash of the workflow's node graph at execution time.
+    #[serde(default)]
+    pub executed_workflow_hash: Option<String>,
+
+    /// Full embedded workflow (useful for forensic audit). Stored as
+    /// `serde_json::Value` to avoid a recursive type cycle: Workflow
+    /// doesn't contain Execution, but Execution can be returned with
+    /// the workflow embedded for one-shot audit views.
+    #[serde(default)]
+    pub embedded_workflow: Option<serde_json::Value>,
 }
 
 /// A single log entry in an execution's audit trail.
+///
+/// Note: the `get_execution` response embeds the full execution record
+/// (which includes the audit trail), so this `LogEntry` type is more of
+/// a future-proof schema. The current API uses `nodeStatuses` + the
+/// `execution` object's fields to surface the per-node log data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogEntry {

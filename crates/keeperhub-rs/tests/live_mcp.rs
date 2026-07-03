@@ -118,3 +118,58 @@ async fn call_workflow_returns_404_for_nonexistent_slug() {
         "expected Error::Api or Error::Mcp, got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn execute_then_get_execution_roundtrips() {
+    use keeperhub_rs::types::ExecutionStatus;
+    use serde_json::json;
+
+    let c = client();
+
+    // Step 1: call the free workflow to get an execution_id.
+    let result = c
+        .call_workflow("sep-eth-balance-test", json!({}))
+        .await
+        .expect("free call_workflow should succeed");
+    let exec_id = &result.execution_id;
+    assert!(!exec_id.is_empty());
+
+    // Step 2: get the full execution detail.
+    let detail = c
+        .get_execution(exec_id)
+        .await
+        .expect("get_execution should succeed");
+
+    // The status envelope should report success.
+    assert_eq!(detail.status.status, ExecutionStatus::Success);
+
+    // The execution record should have the same ID and a real output.
+    assert_eq!(detail.execution.id, *exec_id);
+    assert!(
+        detail.execution.output.get("balance").is_some(),
+        "expected balance in execution output, got: {}",
+        serde_json::to_string_pretty(&detail.execution.output).unwrap_or_default()
+    );
+
+    // The execution should have audit metadata: trigger source, started/ended, duration.
+    assert!(detail.execution.started_at.is_some(), "started_at should be set");
+    assert!(detail.execution.completed_at.is_some(), "completed_at should be set");
+    assert!(detail.execution.duration.is_some(), "duration should be set");
+    assert!(
+        detail.execution.trigger_source.is_some(),
+        "trigger_source should be set"
+    );
+}
+
+#[tokio::test]
+async fn get_execution_for_unknown_id_fails() {
+    let c = client();
+    let err = c
+        .get_execution("this-execution-definitely-does-not-exist-xyz123")
+        .await
+        .expect_err("get_execution with bad id should fail");
+    assert!(
+        matches!(err, keeperhub_rs::Error::Api { .. } | keeperhub_rs::Error::Mcp(_)),
+        "expected Error::Api or Error::Mcp, got {err:?}"
+    );
+}
