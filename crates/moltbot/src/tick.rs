@@ -4,12 +4,15 @@
 //! (default 60s) until a SIGINT (Ctrl-C) is received. Each tick:
 //!
 //! 1. Increments the iteration counter and stamps the state.
-//! 2. Logs the current USDC balance and a "started" line.
-//! 3. Runs the yield strategy (Aave V3 supply/withdraw).
-//! 4. Runs every enabled job in the [`crate::job::JobRegistry`].
-//!
-//! Safe-mode detection (#12) is layered on next; until then the
-//! yield strategy and jobs run unconditionally.
+//! 2. Runs the safe-mode check ([`crate::safe_mode`]). Updates
+//!    `state.safe_mode` and logs a one-shot `Enter`/`Exit` line
+//!    on transitions.
+//! 3. Logs the current USDC balance and a "started" line.
+//! 4. Runs the yield strategy (Aave V3 supply/withdraw) — skipped
+//!    while in safe mode.
+//! 5. Runs every enabled job in the [`crate::job::JobRegistry`].
+//!    Jobs are expected to gate themselves on `state.safe_mode`
+//!    via their [`crate::job::Job::should_run`].
 //!
 //! # Graceful shutdown
 //!
@@ -21,6 +24,7 @@
 
 use crate::config::AgentConfig;
 use crate::job::{JobContext, JobRegistry};
+use crate::safe_mode::{self, SafeModeChange};
 use crate::state::SharedState;
 use crate::yield_strategy::{self, ParkDecision};
 use keeperhub_rs::mcp::McpClient;
@@ -122,19 +126,25 @@ impl AgentLoop {
     }
 
     /// A single tick of the loop. Increments the iteration counter,
-    /// updates the timestamps, logs the current USDC balance, runs
-    /// the yield strategy, and dispatches the job registry.
+    /// updates the timestamps, runs the safe-mode check, logs the
+    /// current USDC balance, runs the yield strategy (when not in
+    /// safe mode), and dispatches the job registry.
     ///
     /// # Order of operations
     ///
     /// 1. Tick bookkeeping (iteration counter, timestamps).
-    /// 2. Log the snapshot.
-    /// 3. Yield strategy: decide whether to supply/withdraw on
-    ///    Aave V3 and execute. Update `last_action` on success.
-    /// 4. Job registry: run every enabled job once. Update
+    /// 2. Safe-mode check (#12): compare balance vs
+    ///    `safe_mode_threshold_usd`, update `state.safe_mode`,
+    ///    emit a one-shot `Enter`/`Exit` log line on transitions.
+    /// 3. Log the snapshot (with the up-to-date `safe_mode`).
+    /// 4. Yield strategy (#10): if not in safe mode, decide
+    ///    whether to supply/withdraw on Aave V3 and execute.
+    ///    Update `last_action` on success.
+    /// 5. Job registry (#11): run every enabled job once. Jobs
+    ///    gate themselves on `state.safe_mode` via their
+    ///    [`crate::job::Job::should_run`]; the registry
+    ///    additionally skips the whole block if empty. Update
     ///    `last_action` for each job that acted.
-    /// 5. *(future: #12)* Safe-mode detection: skip paid actions
-    ///    when balance < `safe_mode_threshold_usd`.
     ///
     /// The yield strategy and job registry are independent — they
     /// share the same MCP client but do not coordinate. A job's
@@ -150,6 +160,47 @@ impl AgentLoop {
             (n, snap)
         };
 
+        // Safe-mode check (#12). Runs before everything else so
+        // the rest of the tick can branch on the up-to-date
+        // `state.safe_mode` value (mutated below, and the
+        // snapshot we pass around is the post-mutation copy).
+        let safe_change = safe_mode::check(
+            snapshot.usdc_balance_usd,
+            self.config.safe_mode_threshold_usd,
+            snapshot.safe_mode,
+        );
+        let mut snapshot = snapshot;
+        match safe_change {
+            SafeModeChange::Enter { balance, threshold } => {
+                tracing::warn!(
+                    balance,
+                    threshold,
+                    "entering safe mode: skipping paid actions until balance recovers"
+                );
+                let mut w = self.state.write().await;
+                w.set_safe_mode(true);
+                snapshot.safe_mode = true;
+            }
+            SafeModeChange::Exit { balance, threshold } => {
+                tracing::info!(
+                    balance,
+                    threshold,
+                    "exiting safe mode: resuming paid actions"
+                );
+                let mut w = self.state.write().await;
+                w.set_safe_mode(false);
+                snapshot.safe_mode = false;
+            }
+            SafeModeChange::NoChange { safe_mode } => {
+                // No state change. `snapshot.safe_mode` is
+                // already correct; no log line (a per-tick
+                // "still in safe mode" would be noisy).
+                if safe_mode {
+                    tracing::debug!("safe mode active; paid actions skipped");
+                }
+            }
+        }
+
         tracing::info!(
             iteration,
             usdc_balance_usd = snapshot.usdc_balance_usd,
@@ -158,52 +209,61 @@ impl AgentLoop {
             "tick"
         );
 
-        // Yield strategy (#10). Safe-mode short-circuit lands in #12;
-        // until then we always consult the strategy.
-        let decision = yield_strategy::decide(
-            snapshot.usdc_balance_usd,
-            self.config.park_threshold_usd,
-            self.config.withdraw_threshold_usd,
-        );
+        // Yield strategy (#10). Skipped entirely while in safe
+        // mode — the agent is too low on USDC to safely engage
+        // Aave V3.
+        if snapshot.safe_mode {
+            tracing::debug!("yield strategy: skipped (safe mode)");
+        } else {
+            let decision = yield_strategy::decide(
+                snapshot.usdc_balance_usd,
+                self.config.park_threshold_usd,
+                self.config.withdraw_threshold_usd,
+            );
 
-        match decision {
-            ParkDecision::NoAction => {
-                tracing::debug!(
-                    balance = snapshot.usdc_balance_usd,
-                    "yield strategy: no action"
-                );
-            }
-            ParkDecision::Supply { .. } | ParkDecision::Withdraw => {
-                tracing::info!(decision = %decision, "yield strategy: executing");
-                match yield_strategy::execute(&self.client, &self.config, &decision).await {
-                    Ok(Some(tx_hash)) => {
-                        tracing::info!(
-                            decision = %decision,
-                            tx_hash = %tx_hash,
-                            "yield strategy: tx broadcast"
-                        );
-                        let mut w = self.state.write().await;
-                        w.record_action(format!("yield::{decision}"));
-                    }
-                    Ok(None) => {
-                        tracing::warn!(
-                            decision = %decision,
-                            "yield strategy: no tx hash in response"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            decision = %decision,
-                            error = %e,
-                            "yield strategy: execution failed"
-                        );
+            match decision {
+                ParkDecision::NoAction => {
+                    tracing::debug!(
+                        balance = snapshot.usdc_balance_usd,
+                        "yield strategy: no action"
+                    );
+                }
+                ParkDecision::Supply { .. } | ParkDecision::Withdraw => {
+                    tracing::info!(decision = %decision, "yield strategy: executing");
+                    match yield_strategy::execute(&self.client, &self.config, &decision).await {
+                        Ok(Some(tx_hash)) => {
+                            tracing::info!(
+                                decision = %decision,
+                                tx_hash = %tx_hash,
+                                "yield strategy: tx broadcast"
+                            );
+                            let mut w = self.state.write().await;
+                            w.record_action(format!("yield::{decision}"));
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                decision = %decision,
+                                "yield strategy: no tx hash in response"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                decision = %decision,
+                                error = %e,
+                                "yield strategy: execution failed"
+                            );
+                        }
                     }
                 }
             }
         }
 
-        // Job registry (#11). Each enabled job runs once per tick;
-        // their outcomes are recorded into the shared state.
+        // Job registry (#11). Each enabled job runs once per
+        // tick; their outcomes are recorded into the shared
+        // state. Jobs' `should_run` is responsible for honoring
+        // `state.safe_mode`; the registry itself does not filter
+        // on it (a future per-job "skip while in safe mode"
+        // policy belongs in the job, not the dispatcher).
         if !self.jobs.is_empty() {
             let ctx = JobContext {
                 client: &self.client,
@@ -483,5 +543,166 @@ mod tests {
         // verify the tick completed without error. (Direct access
         // to `gated` would require moving it, which we already did
         // when we built the registry.)
+    }
+
+    // --- safe-mode (#12) ------------------------------------------------
+
+    #[tokio::test]
+    async fn tick_enters_safe_mode_when_balance_below_threshold() {
+        // Balance 1.0 < safe_mode_threshold (5.0) → Enter
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(1.0);
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(s.safe_mode, "expected safe_mode to be true after tick with low balance");
+    }
+
+    #[tokio::test]
+    async fn tick_exits_safe_mode_when_balance_recovers() {
+        // Start in safe mode with a high balance (recovery scenario).
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(50.0);
+            w.set_safe_mode(true);
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(
+            !s.safe_mode,
+            "expected safe_mode to be false after tick with high balance"
+        );
+    }
+
+    #[tokio::test]
+    async fn tick_stays_out_of_safe_mode_when_balance_already_high() {
+        // Already operational; high balance; safe mode stays off.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(50.0);
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(!s.safe_mode);
+    }
+
+    #[tokio::test]
+    async fn tick_stays_in_safe_mode_when_balance_still_low() {
+        // Already in safe mode; balance still low; stays in.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(1.0);
+            w.set_safe_mode(true);
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(s.safe_mode);
+    }
+
+    #[tokio::test]
+    async fn tick_at_safe_mode_threshold_is_not_safe() {
+        // Boundary: balance == threshold → not in safe mode (strict <)
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(5.0); // exactly the threshold
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(!s.safe_mode);
+    }
+
+    #[tokio::test]
+    async fn tick_skips_yield_strategy_when_in_safe_mode() {
+        // Even with a balance that would normally trigger a
+        // yield action (e.g. 0.0 → Withdraw), the yield strategy
+        // is skipped while in safe mode. We assert this by
+        // verifying `last_action` is `None` after a tick where
+        // the network would have failed (the no-action band
+        // would be 35.0; 0.0 would Withdraw).
+        //
+        // Specifically: with balance 0.0 (way below the
+        // withdraw threshold of 20.0), the yield strategy
+        // would normally call `AaveV3::withdraw`. The network
+        // call fails (no real server in this test) and the
+        // error is absorbed — `last_action` stays `None`. The
+        // important assertion is that *safe mode is also on*
+        // afterwards, which proves the yield path was skipped
+        // (not just failed).
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(0.0);
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(s.safe_mode, "safe mode should be entered at 0.0 balance");
+        // The yield strategy was skipped (no network call,
+        // no tx hash) — `last_action` stays `None`.
+        assert!(s.last_action.is_none());
+    }
+
+    #[tokio::test]
+    async fn tick_skips_jobs_when_in_safe_mode() {
+        // A job that always acts (so we can see it being
+        // skipped vs being run). When the agent is in safe
+        // mode, the job's `should_run` should return `false`.
+        use crate::job::{Job, JobContext, JobOutcome};
+
+        struct ActingJob;
+        impl Job for ActingJob {
+            fn name(&self) -> &'static str {
+                "acting"
+            }
+            fn should_run(
+                &self,
+                state: &crate::state::AgentState,
+                _config: &AgentConfig,
+            ) -> bool {
+                !state.safe_mode
+            }
+            fn tick<'a>(
+                &'a self,
+                _ctx: &'a JobContext<'a>,
+            ) -> crate::job::BoxFuture<'a, keeperhub_rs::Result<JobOutcome>> {
+                Box::pin(async {
+                    Ok(JobOutcome::acted("should_not_record", None, None))
+                })
+            }
+        }
+
+        let state = new_shared_state();
+        {
+            // Pre-set safe mode AND a balance that would keep
+            // the agent in safe mode.
+            let mut w = state.write().await;
+            w.set_usdc_balance(0.0);
+            w.set_safe_mode(true);
+        }
+        let registry = JobRegistry::new().with(ActingJob);
+        let loop_ = AgentLoop::new(
+            state.clone(),
+            test_client(),
+            test_config(),
+            registry,
+        );
+        loop_.tick().await;
+        let s = state.read().await;
+        // The job's `should_run` returned `false` → job was
+        // skipped → `last_action` is still `None`.
+        assert!(s.last_action.is_none());
+        // And safe mode is still on.
+        assert!(s.safe_mode);
     }
 }

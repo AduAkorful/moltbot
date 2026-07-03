@@ -29,6 +29,7 @@
 //! - [`yield_strategy`] — Aave V3 supply/withdraw decision + execution
 //! - [`job`] — the [`job::Job`] trait + [`job::JobRegistry`] dispatcher
 //! - [`jobs`] — built-in [`job::Job`] implementations
+//! - [`safe_mode`] — low-balance detection; skips paid actions
 //!
 //! Public re-exports in the crate root make the structure available
 //! to integration tests under `tests/`.
@@ -36,6 +37,7 @@
 pub mod config;
 pub mod job;
 pub mod jobs;
+pub mod safe_mode;
 pub mod state;
 pub mod tick;
 pub mod yield_strategy;

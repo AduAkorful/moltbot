@@ -142,8 +142,14 @@ impl Job for MorphoHealthJob {
         "morpho_health"
     }
 
-    fn should_run(&self, _state: &AgentState, config: &AgentConfig) -> bool {
-        config.morpho_market_id.is_some()
+    fn should_run(&self, state: &AgentState, config: &AgentConfig) -> bool {
+        // The job is enabled when:
+        // - the user has configured a market to monitor, AND
+        // - the agent is **not** in safe mode (a $0.50 x402
+        //   read-only call is cheap, but we skip while safe
+        //   to make "safe mode" a clean, no-side-effects
+        //   guarantee for operators monitoring the dashboard).
+        config.morpho_market_id.is_some() && !state.safe_mode
     }
 
     fn tick<'a>(&'a self, ctx: &'a JobContext<'a>) -> BoxFuture<'a, Result<JobOutcome>> {
@@ -363,6 +369,17 @@ mod tests {
 
     // --- MorphoHealthJob::should_run() -----------------------------------
 
+    fn cfg_with_market() -> AgentConfig {
+        AgentConfig {
+            keeperhub_api_key: Some("kh_test".to_string()),
+            morpho_market_id: Some(
+                "0x54efc345a0180ad8a99ae62b1c626e0d2e46a4d3936d36e8b54df7fb3d0c1b8f"
+                    .to_string(),
+            ),
+            ..AgentConfig::default()
+        }
+    }
+
     #[test]
     fn should_run_is_false_when_market_id_missing() {
         let job = MorphoHealthJob::new();
@@ -374,17 +391,21 @@ mod tests {
     }
 
     #[test]
-    fn should_run_is_true_when_market_id_set() {
+    fn should_run_is_true_when_market_id_set_and_operational() {
         let job = MorphoHealthJob::new();
-        let cfg = AgentConfig {
-            keeperhub_api_key: Some("kh_test".to_string()),
-            morpho_market_id: Some(
-                "0x54efc345a0180ad8a99ae62b1c626e0d2e46a4d3936d36e8b54df7fb3d0c1b8f"
-                    .to_string(),
-            ),
-            ..AgentConfig::default()
-        };
-        assert!(job.should_run(&AgentState::new(), &cfg));
+        let state = AgentState::new();
+        assert!(!state.safe_mode);
+        assert!(job.should_run(&state, &cfg_with_market()));
+    }
+
+    #[test]
+    fn should_run_is_false_when_safe_mode_active() {
+        // Even with the market configured, the job is gated off
+        // while the agent is in safe mode.
+        let job = MorphoHealthJob::new();
+        let mut state = AgentState::new();
+        state.set_safe_mode(true);
+        assert!(!job.should_run(&state, &cfg_with_market()));
     }
 
     // --- MorphoDecision Display ------------------------------------------
