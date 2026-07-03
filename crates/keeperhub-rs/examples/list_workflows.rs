@@ -1,9 +1,8 @@
 //! Example: list all workflows in your KeeperHub organization.
 //!
-//! This example demonstrates how to construct an [`McpClient`] and call
-//! the `list_workflows` tool. The actual call lands in the next phase
-//! of the project; for now, the example verifies the client compiles
-//! and the environment is set up.
+//! Demonstrates the full happy path: construct an [`McpClient`], perform
+//! the MCP handshake, call `list_workflows`, parse the response, and
+//! print a summary.
 //!
 //! # Usage
 //!
@@ -12,9 +11,8 @@
 //! cargo run --example list_workflows
 //! ```
 //!
-//! The example will print a message indicating the API key was found
-//! and the client was constructed. When the real `list_workflows`
-//! implementation lands, it will print the list of workflows.
+//! Optional: `RUST_LOG=keeperhub_rs=debug cargo run --example list_workflows`
+//! to see per-call tracing.
 
 use keeperhub_rs::mcp::{McpClient, DEFAULT_MCP_URL};
 use keeperhub_rs::Result;
@@ -37,18 +35,29 @@ async fn main() -> Result<()> {
     })?;
 
     let client = McpClient::new(DEFAULT_MCP_URL, &api_key);
-
     tracing::info!(url = %client.url(), "MCP client constructed");
 
-    match client.list_workflows().await {
-        Ok(workflows) => {
-            tracing::info!(count = workflows.len(), "workflows listed");
-            for w in workflows {
-                println!("- {} ({}) — {}", w.name, w.id, w.description.unwrap_or_default());
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "list_workflows not yet implemented (expected in pre-alpha)");
+    let workflows = client.list_workflows().await?;
+    tracing::info!(count = workflows.len(), "workflows listed");
+
+    if workflows.is_empty() {
+        println!("(no workflows in this org yet)");
+    } else {
+        for w in &workflows {
+            let price = w
+                .price_usdc_per_call
+                .as_deref()
+                .map(|p| format!(" (${p}/call)"))
+                .unwrap_or_default();
+            let listed = if w.is_listed { " [listed]" } else { "" };
+            println!(
+                "- {} (id={}){}{}  {}",
+                w.name,
+                w.id,
+                price,
+                listed,
+                w.description.as_deref().unwrap_or(""),
+            );
         }
     }
 

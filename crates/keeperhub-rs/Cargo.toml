@@ -26,6 +26,12 @@ uuid.workspace = true
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 
+[features]
+# Enable live integration tests that hit the real KeeperHub MCP server.
+# These require the KEEPERHUB_API_KEY env var to be set. Run with:
+#   cargo test --features live-mcp --test live_mcp
+live-mcp = []
+
 [[example]]
 name = "list_workflows"
 path = "examples/list_workflows.rs"

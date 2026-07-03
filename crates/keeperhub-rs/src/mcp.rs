@@ -1,8 +1,10 @@
 //! Model Context Protocol (MCP) client for KeeperHub.
 //!
 //! The KeeperHub MCP server is a JSON-RPC 2.0 endpoint over HTTP that
-//! exposes 31 tools (docs claim 19 — outdated as of v1.2.0). The full
-//! reference is at <https://docs.keeperhub.com/ai-tools/mcp-server>.
+//! exposes 31 tools (docs claim 19 — outdated as of v1.2.0) for workflow
+//! management, execution, discovery, marketplace calls, and direct DeFi
+//! operations. The full reference is at
+//! <https://docs.keeperhub.com/ai-tools/mcp-server>.
 //!
 //! # Tools (abridged — see `keeperhub-docs-summary.md` for full list)
 //!
@@ -26,18 +28,56 @@
 //! generic `call_workflow(slug, inputs)` dispatcher; the per-workflow
 //! form exposes a single typed tool. This module targets the aggregate
 //! server for now; per-workflow servers can be added later.
+//!
+//! # Session model
+//!
+//! KeeperHub's MCP server uses the Streamable HTTP transport. The handshake
+//! is sequential: `initialize` → `notifications/initialized` →
+//! `tools/list` (or `tools/call`). The `initialize` response includes an
+//! `Mcp-Session-Id` header containing a JWT (24h expiry per the
+//! `exp` claim). All subsequent requests must echo this header.
+//!
+//! [`McpClient`] manages the session lazily: the first call initializes,
+//! and the session is reused until it expires or the server returns 401.
 
 use crate::error::{Error, Result};
 use crate::types::Workflow;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// The default KeeperHub MCP endpoint (remote, OAuth).
 pub const DEFAULT_MCP_URL: &str = "https://app.keeperhub.com/mcp";
 
+/// The MCP protocol version this client speaks.
+const PROTOCOL_VERSION: &str = "2025-03-26";
+
+/// A cached MCP session: the JWT returned by `initialize` and its expiry.
+#[derive(Debug, Clone)]
+struct Session {
+    /// The JWT in the `Mcp-Session-Id` header.
+    jwt: String,
+    /// When this session is no longer trusted to be valid. We set this
+    /// to a conservative 23 hours from creation (the server issues 24h
+    /// tokens) so we re-initialize before the server rejects us.
+    expires_at: std::time::Instant,
+}
+
+impl Session {
+    fn is_expired(&self) -> bool {
+        std::time::Instant::now() >= self.expires_at
+    }
+}
+
 /// MCP client for the KeeperHub server.
 ///
-/// Cheap to clone (wraps an [`Arc`] internally).
+/// Cheap to clone (wraps an [`Arc`] internally). All public methods
+/// serialize on a per-client session lock, so concurrent calls from
+/// the same client are safe but may block briefly while the session
+/// is being initialized or refreshed.
 #[derive(Debug, Clone)]
 pub struct McpClient {
     inner: Arc<McpClientInner>,
@@ -51,6 +91,10 @@ struct McpClientInner {
     auth_header: String,
     /// Reusable HTTP client.
     http: reqwest::Client,
+    /// Cached session, lazily initialized.
+    session: Mutex<Option<Session>>,
+    /// Monotonic counter for JSON-RPC request ids.
+    next_id: AtomicU64,
 }
 
 impl McpClient {
@@ -64,7 +108,7 @@ impl McpClient {
     /// ```
     pub fn new(url: impl Into<String>, api_key: impl AsRef<str>) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest client builder should not fail with default config");
         Self {
@@ -72,6 +116,8 @@ impl McpClient {
                 url: url.into(),
                 auth_header: format!("Bearer {}", api_key.as_ref()),
                 http,
+                session: Mutex::new(None),
+                next_id: AtomicU64::new(1),
             }),
         }
     }
@@ -84,45 +130,329 @@ impl McpClient {
     /// List all workflows in the authenticated organization.
     ///
     /// Maps to the `list_workflows` MCP tool. Returns an empty vec if the
-    /// organization has no workflows yet.
+    /// organization has no workflows yet (which is *not* an error).
     ///
-    /// **Status:** not yet implemented. The function will be wired up in
-    /// the next phase of the project plan.
+    /// Each workflow includes the full config (nodes, edges, etc.) — the
+    /// same shape returned by `get_workflow`. Marketplace listing data
+    /// (`listedSlug`, `priceUsdcPerCall`, etc.) is also included if the
+    /// workflow is listed.
     pub async fn list_workflows(&self) -> Result<Vec<Workflow>> {
-        // TODO: POST to {url} with a JSON-RPC `tools/call` envelope
-        // { "name": "list_workflows", "arguments": {} }
-        // Parse the `content[0].text` JSON into Vec<Workflow>.
-        let _ = self; // suppress unused warnings
-        Err(Error::Internal(
-            "list_workflows not yet implemented — see plans/setup-verified.md"
-                .to_string(),
-        ))
+        let text = self.tools_call_text("list_workflows", json!({})).await?;
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        serde_json::from_str(&text).map_err(|e| {
+            Error::Internal(format!(
+                "list_workflows: failed to parse response as Vec<Workflow>: {e}; body: {text}"
+            ))
+        })
     }
-}
 
-/// A JSON-RPC 2.0 request envelope (used internally for MCP calls).
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct JsonRpcRequest {
-    pub(crate) jsonrpc: &'static str,
-    pub(crate) id: u64,
-    pub(crate) method: &'static str,
-    pub(crate) params: serde_json::Value,
+    /// Initialize the MCP session (handshake).
+    ///
+    /// Sends `initialize`, captures the `Mcp-Session-Id` JWT from the
+    /// response header, then sends `notifications/initialized`. This is
+    /// called automatically by [`McpClient::list_workflows`] (and every
+    /// other public method), so you shouldn't need to call it directly.
+    /// It's exposed publicly for callers that want to fail fast at
+    /// startup rather than on first call.
+    pub async fn initialize(&self) -> Result<()> {
+        self.ensure_session().await?;
+        Ok(())
+    }
+
+    /// Internal: ensure we have a valid session, creating one if needed.
+    async fn ensure_session(&self) -> Result<Session> {
+        {
+            let guard = self.inner.session.lock().await;
+            if let Some(s) = guard.as_ref() {
+                if !s.is_expired() {
+                    return Ok(s.clone());
+                }
+            }
+        }
+        let session = self.initialize_session().await?;
+        let mut guard = self.inner.session.lock().await;
+        *guard = Some(session.clone());
+        Ok(session)
+    }
+
+    async fn initialize_session(&self) -> Result<Session> {
+        let init_request = json!({
+            "jsonrpc": "2.0",
+            "id": self.next_id(),
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "keeperhub-rs",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            }
+        });
+
+        let resp = self
+            .inner
+            .http
+            .post(&self.inner.url)
+            .header(reqwest::header::AUTHORIZATION, &self.inner.auth_header)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(&init_request)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        // The JWT is in the Mcp-Session-Id response header. We don't
+        // need the body for the handshake, but we consume it to avoid
+        // a connection-leak warning.
+        let jwt = resp
+            .headers()
+            .get("Mcp-Session-Id")
+            .ok_or_else(|| {
+                Error::Mcp("initialize response missing Mcp-Session-Id header".to_string())
+            })?
+            .to_str()
+            .map_err(|e| Error::Mcp(format!("Mcp-Session-Id is not valid UTF-8: {e}")))?
+            .to_string();
+        let _ = resp.text().await?;
+
+        // Send notifications/initialized with the session header.
+        let note = json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        });
+        let _note_resp = self
+            .inner
+            .http
+            .post(&self.inner.url)
+            .header(reqwest::header::AUTHORIZATION, &self.inner.auth_header)
+            .header("Mcp-Session-Id", &jwt)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(&note)
+            .send()
+            .await?;
+
+        // The server returns HTTP 202 for notifications. We don't check
+        // the status — even on error the session is still usable.
+        let _ = _note_resp.text().await?;
+
+        // Set expiry to 23h from now. The server issues 24h tokens; we
+        // refresh early to avoid races at the boundary.
+        Ok(Session {
+            jwt,
+            expires_at: std::time::Instant::now() + Duration::from_secs(23 * 3600),
+        })
+    }
+
+    /// Internal: send a JSON-RPC request, returning the `result` field
+    /// (or an error if the response is `error` or HTTP non-2xx).
+    async fn send_request(&self, method: &str, params: Value) -> Result<Value> {
+        let session = self.ensure_session().await?;
+
+        let id = self.next_id();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        });
+
+        let resp = self
+            .inner
+            .http
+            .post(&self.inner.url)
+            .header(reqwest::header::AUTHORIZATION, &self.inner.auth_header)
+            .header("Mcp-Session-Id", &session.jwt)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .json(&request)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let body = resp.text().await?;
+
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let parsed: JsonRpcResponse<Value> = serde_json::from_str(&body).map_err(|e| {
+            Error::Mcp(format!(
+                "failed to parse JSON-RPC response for {method}: {e}; body: {body}"
+            ))
+        })?;
+
+        if let Some(err) = parsed.error {
+            return Err(Error::Mcp(format!("{}: {}", err.code, err.message)));
+        }
+
+        parsed.result.ok_or_else(|| {
+            Error::Mcp(format!(
+                "JSON-RPC response for {method} had neither result nor error; body: {body}"
+            ))
+        })
+    }
+
+    /// Internal: call an MCP tool and return the unwrapped text content.
+    ///
+    /// `tools/call` responses wrap the data in a `content: [{type, text}]`
+    /// envelope. This helper unwraps it, or returns `Error::Api` if the
+    /// response is marked `isError: true`.
+    async fn tools_call_text(&self, name: &str, arguments: Value) -> Result<String> {
+        let result = self
+            .send_request("tools/call", json!({ "name": name, "arguments": arguments }))
+            .await?;
+        unwrap_content(&result)
+    }
+
+    fn next_id(&self) -> u64 {
+        self.inner.next_id.fetch_add(1, Ordering::Relaxed)
+    }
 }
 
 /// A JSON-RPC 2.0 response envelope.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct JsonRpcResponse<T> {
-    pub(crate) jsonrpc: String,
-    pub(crate) id: u64,
+struct JsonRpcResponse<T> {
     #[serde(default)]
-    pub(crate) result: Option<T>,
+    result: Option<T>,
     #[serde(default)]
-    pub(crate) error: Option<JsonRpcError>,
+    error: Option<JsonRpcError>,
 }
 
 /// A JSON-RPC 2.0 error object.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct JsonRpcError {
-    pub(crate) code: i32,
-    pub(crate) message: String,
+struct JsonRpcError {
+    code: i64,
+    message: String,
+}
+
+/// Unwrap a `tools/call` result envelope.
+///
+/// On success, returns the first text content. On `isError: true`, parses
+/// the text for the underlying status code and message and returns
+/// `Error::Api`.
+fn unwrap_content(result: &Value) -> Result<String> {
+    let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .ok_or_else(|| Error::Mcp("tools/call response missing content array".to_string()))?;
+
+    let first = content
+        .first()
+        .ok_or_else(|| Error::Mcp("tools/call response has empty content array".to_string()))?;
+
+    let text = first
+        .get("text")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| Error::Mcp("tools/call content block is not text".to_string()))?
+        .to_string();
+
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if is_error {
+        let (status, message) = parse_api_error_text(&text);
+        return Err(Error::Api { status, message });
+    }
+
+    Ok(text)
+}
+
+/// Parse an error text from KeeperHub into (status, message).
+///
+/// KeeperHub returns errors in the form
+/// `"API call failed: 503 Service Unavailable - <body>"`. We extract the
+/// status code if present; otherwise default to 500 with the full text.
+fn parse_api_error_text(text: &str) -> (u16, String) {
+    let Some(rest) = text.strip_prefix("API call failed: ") else {
+        return (500, text.to_string());
+    };
+
+    // Find the first space (between status code and reason phrase).
+    let Some(space_idx) = rest.find(' ') else {
+        // Maybe the text is just "API call failed: 503"
+        if let Ok(status) = rest.trim().parse::<u16>() {
+            return (status, text.to_string());
+        }
+        return (500, text.to_string());
+    };
+
+    if let Ok(status) = rest[..space_idx].parse::<u16>() {
+        return (status, text.to_string());
+    }
+
+    (500, text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unwrap_content_returns_text_on_success() {
+        let result = json!({
+            "content": [{"type": "text", "text": "[]"}]
+        });
+        assert_eq!(unwrap_content(&result).unwrap(), "[]");
+    }
+
+    #[test]
+    fn unwrap_content_returns_api_error_on_is_error() {
+        let result = json!({
+            "content": [{"type": "text", "text": "API call failed: 503 Service Unavailable - {\"error\":\"Workflow temporarily unavailable\"}"}],
+            "isError": true
+        });
+        let err = unwrap_content(&result).unwrap_err();
+        match err {
+            Error::Api { status, message } => {
+                assert_eq!(status, 503);
+                assert!(message.contains("503"));
+            }
+            other => panic!("expected Error::Api, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unwrap_content_errors_on_missing_content() {
+        let result = json!({"foo": "bar"});
+        let err = unwrap_content(&result).unwrap_err();
+        assert!(matches!(err, Error::Mcp(_)));
+    }
+
+    #[test]
+    fn parse_api_error_text_extracts_status() {
+        assert_eq!(
+            parse_api_error_text("API call failed: 404 Not Found - {\"error\":\"missing\"}"),
+            (404, "API call failed: 404 Not Found - {\"error\":\"missing\"}".to_string())
+        );
+        assert_eq!(
+            parse_api_error_text("API call failed: 422 - bad input"),
+            (422, "API call failed: 422 - bad input".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_api_error_text_defaults_to_500() {
+        assert_eq!(
+            parse_api_error_text("something weird happened"),
+            (500, "something weird happened".to_string())
+        );
+    }
 }
