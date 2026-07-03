@@ -137,18 +137,36 @@
 
 ## G. Test an x402 paid call
 
-- [ ] **G1.** Browse https://app.keeperhub.com/hub for a paid workflow (look for ones with a $ price per call)
-- [ ] **G2.** If none exist yet, create one yourself:
-  - In the app, create a new workflow: trigger=Manual, action=discord/webhook/something cheap
-  - Publish to marketplace with a tiny price (e.g., $0.01)
-- [ ] **G3.** In Claude Code (with the MCP server + agentic wallet both installed), call the paid workflow via the agent
-- [ ] **G4.** Confirm the agent's logs show a 402 challenge intercepted, signed, and retried
-- [ ] **G5.** Check the KeeperHub run logs — status=completed
-- [ ] **G6.** Check your USDC balance on Base — debited by the call amount
-- [ ] **G7.** Check the creator wallet — credited by the call amount
-- [ ] **G8.** (Optional) Check x402scan.com for the settlement entry
+- [x] **G1.** Searched the marketplace via MCP `search_workflows`. Found 4 cheap paid workflows (`$0.01`) and several at `$0.05`. **All 11 are currently disabled by their owners** (return `503 Workflow temporarily unavailable` when called). Marketplace is essentially empty of live paid workflows right now.
+- [x] **G2.** Created our own paid workflow via MCP: published `E-test-sepolia-balance` as `sep-eth-balance-test` at $0.01. **Slug is permanent** — `sep-eth-balance-test` is now reserved forever. Status: listed but `priceUsdcPerCall: null` because **the price field cannot be set via MCP API** — must be done in the KeeperHub UI's "Marketplace" button on the workflow editor. Workflow is now unlisted (kept on the org; can be re-listed with a price via UI).
+- [ ] **G3.** **BLOCKED** — needs the workflow to have a price set (UI action) AND the agentic wallet funded with USDC (F8).
+- [ ] **G4.** Pending G3.
+- [ ] **G5.** Pending G3.
+- [ ] **G6.** Pending G3.
+- [ ] **G7.** Pending G3.
+- [ ] **G8.** Pending G3.
 
-**Trouble G1:** if no paid workflows exist, just use your own test workflow from G2.
+**Reference workflow `mcp-test`** mentioned in KeeperHub docs as a public test workflow at `/api/mcp/workflows/mcp-test/call` — **does not exist** (returns 404). Doc is wrong or workflow was unpublished.
+
+**Major architecture finding for #5, #6 (x402 auto-pay):**
+The agentic wallet (`@keeperhub/wallet@0.1.15`) exposes an MCP server with a `call_workflow` tool that **"pays AND invokes a KeeperHub marketplace workflow in one tool call. Auto-pays x402 (Base USDC) or MPP (Tempo USDC.e) 402 challenges."** It is registered in our opencode config at `~/.config/opencode/opencode.json`.
+
+**Implication:** for #5 and #6, `keeperhub-rs` does NOT need to implement EIP-3009 signing. It can either:
+- (a) Invoke the wallet's MCP `call_workflow` directly when a workflow is paid (cheapest, offloads all signing).
+- (b) Spawn the wallet's CLI as a subprocess.
+- (c) Build EIP-3009 ourselves (original plan; much more work).
+
+Recommended: **(a) or (b).** Original #5 (M, 4h) and #6 (L, 6h) can both shrink to ~S (1-2h). **Pending user confirmation before re-scoping next-steps.md.**
+
+**Other findings:**
+- EIP-3009 `TransferWithAuthorization` on Base (USDC `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`) is the x402 protocol. Facilitator submits tx and pays gas — agent only debits USDC.
+- MPP on Tempo (USDC.e `0x20c000000000000000000000b9537d11c60e8b50`) is the alternative. KeeperHub wallet auto-selects MPP (faster/cheaper) when both are on offer.
+- 30% platform fee, 70% to creator on marketplace revenue.
+- Workflow quota exemption: paid calls ≥ $0.05 are exempt from the org's monthly execution quota.
+- KeeperHub is registered on x402scan (id `59aa13ab-2a99-4409-a4e1-8927f4006b29`), mppscan, and **8004scan (agent id 31875)** — strong marketing pull for the "first paying customer" pitch. (E-test workflow also showed an ERC-8004 feedback prompt in its response, indicating KeeperHub auto-registers executed workflows.)
+- Workflows created via MCP are `enabled: false` by default — must be toggled via `update_workflow({ enabled: true })` before they can be called.
+- Workflows with execution history cannot be deleted via the API; use `update_workflow` to disable instead.
+- `create_workflow` requires `name`, `description`, `nodes[]`, `edges[]`. `list_workflow` (publish) additionally requires `slug`, `inputSchema`, `workflowType`. `priceUsdcPerCall` is **ignored** by the MCP API — UI only.
 
 ---
 

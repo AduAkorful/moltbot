@@ -33,11 +33,13 @@ Tracks A and B are independent (no blockers between them). Track C depends on A.
 | 4 | keeperhub-rs: implement `get_execution_logs` | A | P0 | S | #2 |
 | 5 | keeperhub-rs: x402 EIP-3009 builder | A | P0 | M | #1 |
 | 6 | keeperhub-rs: `call_paid_workflow` with x402 auto-pay | A | P0 | L | #3, #5 |
-| 7 | Build Aave V3 yield workflow in visual builder | B | P0 | M | #1 |
-| 8 | Build Morpho health-check workflow in visual builder | B | P0 | M | #1 |
+| 7 | `keeperhub-rs`: Aave direct call via `execute_protocol_action` | A | P0 | S | #1, Aave integration |
+| 7b | Build + publish one marketplace workflow (visual builder) | B | P0 | M | #1 |
+| 8 | `keeperhub-rs`: Morpho direct call via `execute_protocol_action` + HF calc | A | P0 | S | #1, Morpho integration |
 | 9 | moltbot: agent loop skeleton (60s tick) | C | P0 | M | #2 |
 | 10 | moltbot: yield strategy (call Aave, parse) | C | P0 | M | #6, #7, #9 |
 | 11 | moltbot: job system + Morpho impl | C | P0 | L | #6, #8, #9 |
+| 11b | Configure Aave V3 + Morpho integrations in KeeperHub | ops | P0 | S | #1 |
 | 12 | moltbot: safe-mode (low-balance detection) | C | P0 | S | #9 |
 | 13 | keeperhub-rs: implement `search_workflows` | A | P1 | S | #2 |
 | 14 | moltbot: SQLite audit log | C | P1 | M | #9 |
@@ -69,10 +71,10 @@ Tracks A and B are independent (no blockers between them). Track C depends on A.
 ```
 Chain 1 (keeperhub-rs core):     #1 → #2 → #3 → #4, #13
                                      ↘ #5 → #6
-Chain 2 (KeeperHub workflows):   #1 → #7, #8
+Chain 2 (KeeperHub workflows):   #1 → #7b (and #11b in parallel)
 Chain 3 (moltbot agent):         #2 → #9 → #10, #11, #12
                                             ↘ #14 → #15
-Chain 4 (build + demo):          #6, #7, #8, #10, #11 → #16, #17, #18 → #19 → #20, #21 → #22
+Chain 4 (build + demo):          #6, #7, #8, #7b, #10, #11 → #16, #17, #18 → #19 → #20, #21 → #22
 Chain 5 (bounty):                #6, #13 → #25 → #26 → #27, #28
 ```
 
@@ -246,53 +248,72 @@ Save as `plans/daily/<date>.md` if you want a record.
 
 ---
 
-### #7 — Build Aave V3 yield workflow in visual builder
+### #7 — `keeperhub-rs`: Aave direct call via `execute_protocol_action`
 
-**Track:** B · **Priority:** P0 · **Estimate:** M (3h) · **Depends on:** #1
+**Track:** A · **Priority:** P0 · **Estimate:** S (1h) · **Depends on:** #1, Aave V3 integration configured in KeeperHub (#11b)
 
-**Why:** The yield strategy that funds the agent. Needs to be callable from Rust as a single slug.
+**Why:** The agent's own yield strategy. We chose direct `execute_protocol_action` over a visual-builder workflow because the wrapper adds nothing — we just need a single Aave supply/withdraw call with our own decision logic. The "publish a workflow to the marketplace" use case is handled by #7b.
 
 **What to do:**
-- Open the KeeperHub visual builder
-- Create workflow `moltbot-aave-supply` with:
-  - Manual trigger
-  - Input: `asset` (string: "USDC" or "USDC.e"), `amount` (string, in atomic units)
-  - Action: `web3/write-contract` calling Aave V3 pool `supply(asset, amount, agentAddress, 0)`
-  - Returns tx hash
-- Create a companion `moltbot-aave-withdraw` workflow
-- Test manually in the visual builder
-- Note the slugs
+- Add `McpClient::execute_protocol_action(action_type, params).await -> Result<JsonValue>` to `keeperhub-rs`
+- Wrap `McpClient::tools_call("execute_protocol_action", args)` under the hood
+- Add typed helpers `aave_supply(network, asset, amount, on_behalf_of)` and `aave_withdraw(network, asset, amount, to)` that call through `execute_protocol_action`
+- Integration test on Sepolia testnet (no real Aave on Sepolia — use `network=11155111` and a test contract, or mock at the MCP layer with `live-mcp` feature flag)
 
 **Acceptance criteria:**
-- [ ] Supply workflow can be called manually with USDC, produces a real Aave tx
-- [ ] Withdraw workflow works
-- [ ] Both workflows are listed in `search_workflows`
-- [ ] Both appear in the runs panel after testing
+- [ ] `execute_protocol_action` returns parsed JSON for a valid action
+- [ ] Aave supply/withdraw typed helpers work
+- [ ] Integration test: `cargo test --features live-mcp` passes against the real MCP server
+- [ ] `cargo run -p keeperhub-rs --example aave_supply` does a real testnet supply
 
-**Done =** Two working Aave workflows (supply, withdraw) callable by slug.
+**Done =** Rust code that supplies/withdraws from Aave V3 via a single typed call.
 
 ---
 
-### #8 — Build Morpho health-check workflow in visual builder
+### #7b — Build + publish one marketplace workflow (visual builder)
 
 **Track:** B · **Priority:** P0 · **Estimate:** M (3h) · **Depends on:** #1
 
-**Why:** The job the agent does. Needs to be callable from Rust as a single slug.
+**Why:** The supply side of the "first paying customer" pitch. We *also* publish a workflow to the KeeperHub marketplace — so we're not just consuming, we're participating. Doubles as the bounty "ecosystem contribution" proof.
 
 **What to do:**
-- Create workflow `moltbot-morpho-health` with:
+- Pick the workflow (suggested: "Aave + Morpho portfolio risk check" — given any wallet, returns HF, collateral, debt, suggested action)
+- Build it in the visual builder with:
   - Manual trigger
-  - Input: `position_id` (string)
-  - Action: read Morpho position, compute health factor, return as JSON
-- Create a companion `moltbot-morpho-collateralize` workflow (if HF < threshold, supply more collateral)
-- Test both manually
+  - Input: `wallet` (string)
+  - Actions: `morpho/vault-balance` + `aave-v3/get-user-account-data` + a small condition node
+  - Returns: structured JSON
+- Publish to marketplace with `list_workflow` MCP tool, price `$0.05` per call
+- Test the listing by calling it from `keeperhub-rs` via `search_workflows` + `call_workflow` (x402 auto-pay kicks in — this exercises #5/#6 too)
 
 **Acceptance criteria:**
-- [ ] Health-check returns structured JSON: `{ health_factor: float, collateral: string, debt: string }`
-- [ ] Both workflows are listed in `search_workflows`
-- [ ] Test on a real Morpho position (use a small test position on Base)
+- [ ] Workflow is listed in the marketplace (slug is set)
+- [ ] `search_workflows` finds it by tag/category
+- [ ] `call_workflow` from our own `keeperhub-rs` succeeds and pays the x402 amount
+- [ ] Listed workflow appears in `x402scan`
+- [ ] Listed workflow's runs panel shows clean runs
 
-**Done =** Two working Morpho workflows callable by slug.
+**Done =** A listed KeeperHub workflow that other agents can pay for, called at least once by MoltBot itself.
+
+---
+
+### #8 — `keeperhub-rs`: Morpho direct call via `execute_protocol_action` + HF calc
+
+**Track:** A · **Priority:** P0 · **Estimate:** S (1h) · **Depends on:** #1, Morpho integration configured in KeeperHub (#11b)
+
+**Why:** The agent's own job (position monitoring). Direct call is fine — health-factor math is a Rust function, not a workflow.
+
+**What to do:**
+- Add typed helpers `morpho_vault_balance(network, vault, account)` and `morpho_market_position(network, market_id, user)`
+- Add `compute_health_factor(collateral_usd, debt_usd, liq_threshold) -> f64` as a pure Rust function
+- Integration tests
+
+**Acceptance criteria:**
+- [ ] Morpho balance helpers work
+- [ ] `compute_health_factor` unit-tested (3 cases: healthy, at-risk, underwater)
+- [ ] Integration test on Base testnet (or mock with `live-mcp`)
+
+**Done =** Rust code that reads a Morpho position and computes its health factor.
 
 ---
 
@@ -351,7 +372,7 @@ Save as `plans/daily/<date>.md` if you want a record.
 **What to do:**
 - Add `crates/moltbot/src/job.rs` (Job trait)
 - Add `crates/moltbot/src/jobs/morpho_health.rs` (the Morpho job)
-- The job calls `moltbot-morpho-health`, parses the result, decides whether to call `moltbot-morpho-collateralize`
+- The job uses the typed helpers from #8 to read position + compute HF, decides whether to call `morpho/supply-collateral` via `execute_protocol_action`
 - Add a `Job` enum and dispatcher
 
 **Acceptance criteria:**
@@ -361,6 +382,28 @@ Save as `plans/daily/<date>.md` if you want a record.
 - [ ] Adding a second job (e.g., `price_alert`) requires <50 lines
 
 **Done =** Agent monitors a Morpho position and auto-collateralizes on low health.
+
+---
+
+### #11b — Configure Aave V3 + Morpho integrations in KeeperHub
+
+**Track:** ops · **Priority:** P0 · **Estimate:** S (15 min) · **Depends on:** #1
+
+**Why:** `execute_protocol_action` with `requiresCredentials: true` (Aave, Morpho) won't work until the org-level integration is configured. One-time setup.
+
+**What to do:**
+- In KeeperHub app: Integrations → Add → search "Aave V3" → connect
+- Same for Morpho
+- Verify with `list_integrations` MCP tool — both should appear
+- Note the integration IDs in `keeperhub-docs-summary.md`
+
+**Acceptance criteria:**
+- [ ] Aave V3 integration is configured
+- [ ] Morpho integration is configured
+- [ ] `list_integrations` shows both
+- [ ] A test call to `execute_protocol_action("aave-v3/get-user-account-data", ...)` returns successfully
+
+**Done =** Aave + Morpho integrations live in the org. Required for #7, #8, #10, #11.
 
 ---
 
