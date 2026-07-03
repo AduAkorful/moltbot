@@ -15,9 +15,11 @@
 //! and its input fields are available as `{{@trigger-1:Manual Trigger.<field>}}`.
 //!
 //! If a template reference is wrong, the visual builder highlights it
-//! in red and the workflow fails to validate. Use
-//! [`crate::mcp::McpClient::validate_workflow`] (not yet implemented
-//! in the Rust client) or click into the workflow in the UI to confirm.
+//! in red and the workflow fails to validate. The KeeperHub
+//! MCP server exposes a `validate_workflow` tool (not yet wrapped by
+//! the Rust client — see `mcp.rs` for the tool list) that surfaces
+//! these errors programmatically. For now, click into the workflow
+//! in the UI to confirm.
 //!
 //! # Adding new templates
 //!

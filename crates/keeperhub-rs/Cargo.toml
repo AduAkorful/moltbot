@@ -1,15 +1,24 @@
 [package]
 name = "keeperhub-rs"
 version = "0.1.0"
-description = "Rust client for the KeeperHub onchain automation platform"
+description = "First Rust client for the KeeperHub onchain automation platform. MCP JSON-RPC transport, typed helpers for Aave V3 and Morpho Blue, x402 402-challenge parsing, and pre-built marketplace workflow templates."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository = { workspace = true }
+documentation = "https://docs.rs/keeperhub-rs"
 readme = "README.md"
-keywords = ["keeperhub", "blockchain", "automation", "mcp", "x402"]
-categories = ["api-bindings", "web-programming", "cryptography::cryptocurrencies"]
+keywords = ["keeperhub", "blockchain", "automation", "mcp", "x402", "aave", "morpho", "agent"]
+categories = ["api-bindings", "web-programming", "cryptography::cryptocurrencies", "asynchronous"]
+include = [
+    "src/**/*.rs",
+    "examples/**/*.rs",
+    "tests/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+]
 
 [dependencies]
 tokio.workspace = true

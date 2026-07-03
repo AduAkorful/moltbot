@@ -27,7 +27,7 @@ fn api_key() -> String {
 }
 
 fn client() -> McpClient {
-    McpClient::new(DEFAULT_MCP_URL, &api_key())
+    McpClient::new(DEFAULT_MCP_URL, api_key())
 }
 
 #[tokio::test]

@@ -258,7 +258,7 @@ impl McpClient {
     /// `feedback` prompt.
     ///
     /// For **paid** workflows, returns
-    /// [`Error::X402Unpaid`] with the parsed [`PaymentChallenge`].
+    /// [`Error::X402Unpaid`] with the parsed [`crate::types::PaymentChallenge`].
     /// Callers should then either:
     ///
     /// 1. Invoke the KeeperHub agentic wallet's MCP server

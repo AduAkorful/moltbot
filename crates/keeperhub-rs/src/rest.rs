@@ -30,7 +30,7 @@ pub const DEFAULT_REST_URL: &str = "https://app.keeperhub.com/api/v1";
 
 /// REST client for the KeeperHub API.
 ///
-/// Cheap to clone (wraps an [`Arc`] internally).
+/// Cheap to clone (wraps a [`std::sync::Arc`] internally).
 #[derive(Debug, Clone)]
 pub struct RestClient {
     // Inner state will be added when the client is implemented.
