@@ -31,6 +31,7 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+pub mod aave;
 pub mod error;
 pub mod mcp;
 pub mod rest;

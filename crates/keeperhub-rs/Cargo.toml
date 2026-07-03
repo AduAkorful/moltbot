@@ -43,3 +43,7 @@ path = "examples/call_workflow.rs"
 [[example]]
 name = "search_workflows"
 path = "examples/search_workflows.rs"
+
+[[example]]
+name = "aave_supply"
+path = "examples/aave_supply.rs"

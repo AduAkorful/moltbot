@@ -176,6 +176,78 @@ impl McpClient {
         unwrap_search_envelope(&text)
     }
 
+    /// Execute a DeFi protocol action directly, bypassing the visual
+    /// workflow builder.
+    ///
+    /// Maps to the `execute_protocol_action` MCP tool. Use
+    /// [`McpClient::search_protocol_actions`] to discover what actions
+    /// are available and what params each requires; the `action_type`
+    /// follows the `protocol/action-slug` format (e.g. `aave-v3/supply`,
+    /// `morpho/get-position`).
+    ///
+    /// `params` is a free-form JSON object whose shape depends on the
+    /// action. The KeeperHub-side protocol-specific params (network,
+    /// wallet) and the protocol-side action params (asset, amount, etc.)
+    /// are all packed into the same object.
+    ///
+    /// Note: protocol actions are *plugins* (not credentialed
+    /// integrations). Write actions need a wallet — the existing org
+    /// `web3` integration is used implicitly when exactly one is
+    /// configured.
+    pub async fn execute_protocol_action(
+        &self,
+        action_type: &str,
+        params: Value,
+    ) -> Result<Value> {
+        let text = self
+            .tools_call_text(
+                "execute_protocol_action",
+                json!({
+                    "actionType": action_type,
+                    "params": params,
+                }),
+            )
+            .await?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|e| {
+            Error::Internal(format!(
+                "execute_protocol_action({action_type}): failed to parse response: {e}; body: {text}"
+            ))
+        })
+    }
+
+    /// Search for available DeFi protocol actions.
+    ///
+    /// Maps to the `search_protocol_actions` MCP tool. Use to discover
+    /// supported protocols and their action slugs before calling
+    /// [`McpClient::execute_protocol_action`].
+    pub async fn search_protocol_actions(
+        &self,
+        query: Option<&str>,
+        protocol: Option<&str>,
+    ) -> Result<Value> {
+        let mut args = serde_json::Map::new();
+        if let Some(q) = query {
+            args.insert("query".to_string(), Value::String(q.to_string()));
+        }
+        if let Some(p) = protocol {
+            args.insert("protocol".to_string(), Value::String(p.to_string()));
+        }
+        let text = self
+            .tools_call_text("search_protocol_actions", Value::Object(args))
+            .await?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).map_err(|e| {
+            Error::Internal(format!(
+                "search_protocol_actions: failed to parse response: {e}; body: {text}"
+            ))
+        })
+    }
+
     /// Call a marketplace workflow by slug.
     ///
     /// For **free** workflows, returns the [`CallWorkflowResult`] with

@@ -266,3 +266,64 @@ async fn search_workflows_with_unknown_category_returns_empty_or_subset() {
         assert!(w.is_listed);
     }
 }
+
+#[tokio::test]
+async fn search_protocol_actions_finds_aave_v3_supply() {
+    let c = client();
+    let resp = c
+        .search_protocol_actions(Some("supply"), Some("aave-v3"))
+        .await
+        .expect("search_protocol_actions should succeed");
+
+    // The response is a free-form JSON object. We don't pin its exact
+    // shape (the server may return an array, an object with an items
+    // key, etc.) — we just require that the supply action is mentioned
+    // somewhere in it.
+    let text = serde_json::to_string(&resp).unwrap_or_default();
+    assert!(
+        text.contains("supply"),
+        "expected 'supply' in search response, got: {text}"
+    );
+    assert!(
+        text.contains("aave-v3") || text.to_lowercase().contains("aave"),
+        "expected 'aave' in search response, got: {text}"
+    );
+}
+
+#[tokio::test]
+async fn execute_protocol_action_get_aave_account_data_succeeds() {
+    use keeperhub_rs::aave::AaveV3;
+
+    let c = client();
+
+    // The creator wallet has no Aave position. The read-only call
+    // should still succeed and return an object with the documented
+    // keys (totalCollateralBase, totalDebtBase, availableBorrowsBase,
+    // currentLiquidationThreshold, ltv, healthFactor). Values may be
+    // zero. We just require the call works and the response parses.
+    let data = AaveV3::get_user_account_data(
+        &c,
+        "1", // Ethereum mainnet
+        "0x54F9Fe5A1f63064fc083928df60A95db2dc2CE39",
+    )
+    .await
+    .expect("aave-v3/get-user-account-data should succeed for a known address");
+
+    let obj = data
+        .as_object()
+        .expect("response should be a JSON object");
+    // The Aave plugin doc lists these six fields. Require at least one
+    // — the server may return more (e.g. an `error` field for the
+    // empty-position case) but the canonical ones must be present.
+    let required = [
+        "healthFactor",
+        "totalCollateralBase",
+        "totalDebtBase",
+    ];
+    for field in required {
+        assert!(
+            obj.contains_key(field),
+            "expected field {field:?} in response, got: {obj:?}"
+        );
+    }
+}
