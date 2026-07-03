@@ -7,12 +7,16 @@
 //! 2. Runs the safe-mode check ([`crate::safe_mode`]). Updates
 //!    `state.safe_mode` and logs a one-shot `Enter`/`Exit` line
 //!    on transitions.
-//! 3. Logs the current USDC balance and a "started" line.
-//! 4. Runs the yield strategy (Aave V3 supply/withdraw) — skipped
+//! 3. Opens an audit-log transaction (if an audit log is
+//!    configured). All actions taken during the tick are
+//!    recorded against this run.
+//! 4. Logs the current USDC balance and a "started" line.
+//! 5. Runs the yield strategy (Aave V3 supply/withdraw) — skipped
 //!    while in safe mode.
-//! 5. Runs every enabled job in the [`crate::job::JobRegistry`].
+//! 6. Runs every enabled job in the [`crate::job::JobRegistry`].
 //!    Jobs are expected to gate themselves on `state.safe_mode`
 //!    via their [`crate::job::Job::should_run`].
+//! 7. Commits the audit-log transaction.
 //!
 //! # Graceful shutdown
 //!
@@ -22,6 +26,7 @@
 //! crate's `Termination` future isn't worth the dep for a binary
 //! target — add it later if needed).
 
+use crate::audit::{ActionRecord, AuditLog, TickHandle};
 use crate::config::AgentConfig;
 use crate::job::{JobContext, JobRegistry};
 use crate::safe_mode::{self, SafeModeChange};
@@ -48,6 +53,11 @@ pub struct AgentLoop {
     /// The job registry. Empty by default; populated in `main`
     /// via [`JobRegistry::with`]. Cheap to clone (Arc-bump).
     jobs: Arc<JobRegistry>,
+    /// Optional audit log. When `Some`, every tick is persisted
+    /// to SQLite (runs + actions + x402 payments). `None`
+    /// disables persistence — used by unit tests and any
+    /// short-lived process that doesn't need an audit trail.
+    audit: Option<Arc<AuditLog>>,
     shutdown: Arc<Notify>,
 }
 
@@ -58,18 +68,21 @@ impl AgentLoop {
     /// KeeperHub MCP client. `config` carries the runtime tunables
     /// (tick interval, thresholds, network). `jobs` is the registry
     /// of jobs to run on every tick — pass [`JobRegistry::new`] for
-    /// an empty (no-op) registry.
+    /// an empty (no-op) registry. `audit` is the optional SQLite
+    /// audit log; pass `None` to disable persistence.
     pub fn new(
         state: SharedState,
         client: Arc<McpClient>,
         config: Arc<AgentConfig>,
         jobs: JobRegistry,
+        audit: Option<Arc<AuditLog>>,
     ) -> Self {
         Self {
             state,
             client,
             config,
             jobs: Arc::new(jobs),
+            audit,
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -128,7 +141,9 @@ impl AgentLoop {
     /// A single tick of the loop. Increments the iteration counter,
     /// updates the timestamps, runs the safe-mode check, logs the
     /// current USDC balance, runs the yield strategy (when not in
-    /// safe mode), and dispatches the job registry.
+    /// safe mode), dispatches the job registry, and (if an audit
+    /// log is configured) records everything in a single
+    /// transaction.
     ///
     /// # Order of operations
     ///
@@ -136,15 +151,23 @@ impl AgentLoop {
     /// 2. Safe-mode check (#12): compare balance vs
     ///    `safe_mode_threshold_usd`, update `state.safe_mode`,
     ///    emit a one-shot `Enter`/`Exit` log line on transitions.
-    /// 3. Log the snapshot (with the up-to-date `safe_mode`).
-    /// 4. Yield strategy (#10): if not in safe mode, decide
+    /// 3. Open the audit-log transaction (if `audit` is `Some`).
+    ///    All actions taken during the tick are recorded against
+    ///    this run.
+    /// 4. Log the snapshot (with the up-to-date `safe_mode`).
+    /// 5. Yield strategy (#10): if not in safe mode, decide
     ///    whether to supply/withdraw on Aave V3 and execute.
-    ///    Update `last_action` on success.
-    /// 5. Job registry (#11): run every enabled job once. Jobs
+    ///    Update `last_action` on success; record the action
+    ///    to the audit log.
+    /// 6. Job registry (#11): run every enabled job once. Jobs
     ///    gate themselves on `state.safe_mode` via their
     ///    [`crate::job::Job::should_run`]; the registry
     ///    additionally skips the whole block if empty. Update
-    ///    `last_action` for each job that acted.
+    ///    `last_action` for each job that acted; record each
+    ///    action to the audit log.
+    /// 7. Commit the audit-log transaction. On any error in
+    ///    steps 5–6 the run is marked `error` (rather than
+    ///    dropped) so the row remains in the DB for audit.
     ///
     /// The yield strategy and job registry are independent — they
     /// share the same MCP client but do not coordinate. A job's
@@ -201,6 +224,22 @@ impl AgentLoop {
             }
         }
 
+        // Audit-log transaction (#14). Opens a tick handle
+        // for the duration of the tick; commit/abort happens
+        // at the end. Errors opening the transaction are
+        // logged but do not stop the tick — the in-memory
+        // state and the MCP calls still happen.
+        let mut audit_tick: Option<TickHandle<'_>> = match &self.audit {
+            Some(log) => match log.start_tick(iteration).await {
+                Ok(handle) => Some(handle),
+                Err(e) => {
+                    tracing::error!(error = %e, "audit log: start_tick failed");
+                    None
+                }
+            },
+            None => None,
+        };
+
         tracing::info!(
             iteration,
             usdc_balance_usd = snapshot.usdc_balance_usd,
@@ -212,6 +251,7 @@ impl AgentLoop {
         // Yield strategy (#10). Skipped entirely while in safe
         // mode — the agent is too low on USDC to safely engage
         // Aave V3.
+        let mut tick_had_error = false;
         if snapshot.safe_mode {
             tracing::debug!("yield strategy: skipped (safe mode)");
         } else {
@@ -237,8 +277,24 @@ impl AgentLoop {
                                 tx_hash = %tx_hash,
                                 "yield strategy: tx broadcast"
                             );
-                            let mut w = self.state.write().await;
-                            w.record_action(format!("yield::{decision}"));
+                            let action_label = format!("yield::{decision}");
+                            // Record to in-memory state
+                            {
+                                let mut w = self.state.write().await;
+                                w.record_action(action_label.clone());
+                            }
+                            // Record to audit log
+                            if let Some(tick) = audit_tick.as_mut() {
+                                let mut record =
+                                    ActionRecord::new(&action_label).with_tx_hash(&tx_hash);
+                                if let Some(note) = action_note_for_yield(&decision) {
+                                    record = record.with_note(note);
+                                }
+                                if let Err(e) = tick.record_action(&record).await {
+                                    tracing::error!(error = %e, "audit log: record_action failed");
+                                    tick_had_error = true;
+                                }
+                            }
                         }
                         Ok(None) => {
                             tracing::warn!(
@@ -252,6 +308,7 @@ impl AgentLoop {
                                 error = %e,
                                 "yield strategy: execution failed"
                             );
+                            tick_had_error = true;
                         }
                     }
                 }
@@ -270,14 +327,55 @@ impl AgentLoop {
                 config: &self.config,
                 state: &snapshot,
             };
-            let outcomes = self.jobs.run_all(&ctx).await;
-            for outcome in outcomes {
+            let report = self.jobs.run_all(&ctx).await;
+            if report.had_errors() {
+                tick_had_error = true;
+            }
+            for outcome in report.outcomes {
                 if let Some(action) = outcome.action_taken {
-                    let mut w = self.state.write().await;
-                    w.record_action(action);
+                    {
+                        let mut w = self.state.write().await;
+                        w.record_action(action.clone());
+                    }
+                    if let Some(tick) = audit_tick.as_mut() {
+                        let mut record = ActionRecord::new(&action);
+                        if let Some(tx) = outcome.tx_hash.as_deref() {
+                            record = record.with_tx_hash(tx);
+                        }
+                        if let Some(note) = outcome.note.as_deref() {
+                            record = record.with_note(note);
+                        }
+                        if let Err(e) = tick.record_action(&record).await {
+                            tracing::error!(error = %e, "audit log: record_action failed");
+                            tick_had_error = true;
+                        }
+                    }
                 }
             }
         }
+
+        // Commit the audit-log transaction. On error, mark the
+        // run as `error` so the row remains in the DB for
+        // post-mortem.
+        if let Some(tick) = audit_tick {
+            if tick_had_error {
+                if let Err(e) = tick.abort_with_error().await {
+                    tracing::error!(error = %e, "audit log: abort_with_error failed");
+                }
+            } else if let Err(e) = tick.commit().await {
+                tracing::error!(error = %e, "audit log: commit failed");
+            }
+        }
+    }
+}
+
+/// Build a short human-readable note for a yield decision, used
+/// as the `note` column in the audit log's `actions` table.
+fn action_note_for_yield(decision: &ParkDecision) -> Option<String> {
+    match decision {
+        ParkDecision::Supply { amount_usd } => Some(format!("amount_usd={amount_usd:.2}")),
+        ParkDecision::Withdraw => Some("withdraw_all".to_string()),
+        ParkDecision::NoAction => None,
     }
 }
 
@@ -317,10 +415,25 @@ mod tests {
         ))
     }
 
-    /// Build a loop with an empty job registry. Use [`test_loop_with_jobs`]
-    /// to pass a custom registry.
+    /// Build a loop with an empty job registry and no audit
+    /// log. Most unit tests use this; integration tests for
+    /// the audit log construct their own.
     fn test_loop(state: SharedState) -> AgentLoop {
-        AgentLoop::new(state, test_client(), test_config(), JobRegistry::new())
+        AgentLoop::new(
+            state,
+            test_client(),
+            test_config(),
+            JobRegistry::new(),
+            None,
+        )
+    }
+
+    /// Build an in-memory audit log for tests. Tests that
+    /// need an audit log construct the log here and pass it
+    /// to [`AgentLoop::new`] directly (so the test can
+    /// control the loop's full configuration).
+    async fn test_audit_log() -> Arc<crate::audit::AuditLog> {
+        Arc::new(crate::audit::AuditLog::in_memory().await.unwrap())
     }
 
     #[tokio::test]
@@ -486,6 +599,7 @@ mod tests {
             test_client(),
             test_config(),
             registry,
+            None,
         );
         loop_.tick().await;
 
@@ -537,6 +651,7 @@ mod tests {
             test_client(),
             test_config(),
             registry,
+            None,
         );
         loop_.tick().await;
         // The counter inside the gated job is unreachable; we just
@@ -696,6 +811,7 @@ mod tests {
             test_client(),
             test_config(),
             registry,
+            None,
         );
         loop_.tick().await;
         let s = state.read().await;
@@ -704,5 +820,157 @@ mod tests {
         assert!(s.last_action.is_none());
         // And safe mode is still on.
         assert!(s.safe_mode);
+    }
+
+    // --- audit log (#14) ------------------------------------------------
+
+    #[tokio::test]
+    async fn tick_persists_run_and_actions_to_audit_log() {
+        // A job that always acts. We verify that:
+        // 1. A run row is written (status='ok' after commit)
+        // 2. The job's action is recorded with the right kind
+        // 3. count_runs and count_actions match
+        use crate::job::{Job, JobContext, JobOutcome};
+        use sqlx::Row;
+
+        struct ActingJob;
+        impl Job for ActingJob {
+            fn name(&self) -> &'static str {
+                "test_actor"
+            }
+            fn should_run(
+                &self,
+                _state: &crate::state::AgentState,
+                _config: &AgentConfig,
+            ) -> bool {
+                true
+            }
+            fn tick<'a>(
+                &'a self,
+                _ctx: &'a JobContext<'a>,
+            ) -> crate::job::BoxFuture<'a, keeperhub_rs::Result<JobOutcome>> {
+                Box::pin(async {
+                    Ok(JobOutcome::acted(
+                        "test::did_a_thing",
+                        Some("0xfeed".to_string()),
+                        Some("test note".to_string()),
+                    ))
+                })
+            }
+        }
+
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(35.0);
+        }
+        let log = test_audit_log().await;
+        let registry = JobRegistry::new().with(ActingJob);
+        let loop_ = AgentLoop::new(
+            state.clone(),
+            test_client(),
+            test_config(),
+            registry,
+            Some(Arc::clone(&log)),
+        );
+        loop_.tick().await;
+
+        // 1 run, 1 action persisted.
+        assert_eq!(log.count_runs().await.unwrap(), 1);
+        assert_eq!(log.count_actions().await.unwrap(), 1);
+
+        // Inspect the run row directly.
+        let row = sqlx::query("SELECT status, kind, iteration FROM runs")
+            .fetch_one(log.pool())
+            .await
+            .unwrap();
+        let status: String = row.get("status");
+        let kind: String = row.get("kind");
+        let iteration: i64 = row.get("iteration");
+        assert_eq!(status, "ok");
+        assert_eq!(kind, "tick");
+        assert_eq!(iteration, 1);
+
+        // Inspect the action row.
+        let row = sqlx::query("SELECT kind, tx_hash, note FROM actions")
+            .fetch_one(log.pool())
+            .await
+            .unwrap();
+        let action_kind: String = row.get("kind");
+        let tx_hash: Option<String> = row.get("tx_hash");
+        let note: Option<String> = row.get("note");
+        assert_eq!(action_kind, "test::did_a_thing");
+        assert_eq!(tx_hash.as_deref(), Some("0xfeed"));
+        assert_eq!(note.as_deref(), Some("test note"));
+    }
+
+    #[tokio::test]
+    async fn tick_persists_run_with_error_status_on_failure() {
+        // A job that returns an error. The tick should mark
+        // the run with status='error' rather than 'ok'.
+        use crate::job::{Job, JobContext, JobOutcome};
+        use sqlx::Row;
+
+        struct FailingJob;
+        impl Job for FailingJob {
+            fn name(&self) -> &'static str {
+                "failing"
+            }
+            fn should_run(
+                &self,
+                _state: &crate::state::AgentState,
+                _config: &AgentConfig,
+            ) -> bool {
+                true
+            }
+            fn tick<'a>(
+                &'a self,
+                _ctx: &'a JobContext<'a>,
+            ) -> crate::job::BoxFuture<'a, keeperhub_rs::Result<JobOutcome>> {
+                Box::pin(async {
+                    Err(keeperhub_rs::Error::Config(
+                        "synthetic".to_string(),
+                    ))
+                })
+            }
+        }
+
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(35.0);
+        }
+        let log = Arc::new(crate::audit::AuditLog::in_memory().await.unwrap());
+        let registry = JobRegistry::new().with(FailingJob);
+        let loop_ = AgentLoop::new(
+            state.clone(),
+            test_client(),
+            test_config(),
+            registry,
+            Some(Arc::clone(&log)),
+        );
+        loop_.tick().await;
+
+        // The run row should be present, marked 'error'.
+        assert_eq!(log.count_runs().await.unwrap(), 1);
+        let row = sqlx::query("SELECT status FROM runs")
+            .fetch_one(log.pool())
+            .await
+            .unwrap();
+        let status: String = row.get("status");
+        assert_eq!(status, "error");
+    }
+
+    #[tokio::test]
+    async fn tick_without_audit_does_not_persist() {
+        // No audit log configured → no DB writes, no errors.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(35.0);
+        }
+        let loop_ = test_loop(state.clone());
+        // Should not panic or error.
+        loop_.tick().await;
     }
 }

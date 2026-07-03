@@ -43,7 +43,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 ///
 /// `tx_hash` is set by write jobs that successfully broadcast an
 /// onchain transaction.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobOutcome {
     /// A short, human-readable label of the action the job took
     /// (e.g. `"morpho::supply_collateral"`). `None` when the job
@@ -174,11 +174,12 @@ impl JobRegistry {
 
     /// Run every enabled job once. Errors are logged with the
     /// job's `name()` and absorbed; a failing job does not stop
-    /// the rest. Outcomes whose `action_taken` is `Some` are
-    /// returned in order so the caller can record them in the
-    /// shared state.
-    pub async fn run_all(&self, ctx: &JobContext<'_>) -> Vec<JobOutcome> {
+    /// the rest. Returns a [`JobRunReport`] listing each
+    /// successful outcome and a count of errors so the caller
+    /// can decide whether to mark the run as failed.
+    pub async fn run_all(&self, ctx: &JobContext<'_>) -> JobRunReport {
         let mut outcomes = Vec::new();
+        let mut error_count: usize = 0;
         for job in &self.jobs {
             if !job.should_run(ctx.state, ctx.config) {
                 tracing::debug!(job = job.name(), "job: should_run=false, skipping");
@@ -200,6 +201,7 @@ impl JobRegistry {
                     outcomes.push(outcome);
                 }
                 Err(e) => {
+                    error_count += 1;
                     tracing::error!(
                         job = job.name(),
                         error = %e,
@@ -208,7 +210,42 @@ impl JobRegistry {
                 }
             }
         }
-        outcomes
+        JobRunReport {
+            outcomes,
+            error_count,
+        }
+    }
+}
+
+/// The result of a single [`JobRegistry::run_all`] invocation.
+///
+/// `outcomes` lists every job that ran (successfully). Disabled
+/// jobs (`should_run == false`) are silently skipped and do
+/// not appear here. `error_count` is the number of jobs that
+/// returned an error during their tick; those errors are
+/// logged by [`JobRegistry::run_all`] and not surfaced via
+/// the outcomes (use `error_count > 0` to mark the run as
+/// failed).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct JobRunReport {
+    /// Successful job outcomes, in registry order.
+    pub outcomes: Vec<JobOutcome>,
+    /// Number of jobs that errored during this tick.
+    pub error_count: usize,
+}
+
+impl JobRunReport {
+    /// Did any job error during this tick?
+    pub fn had_errors(&self) -> bool {
+        self.error_count > 0
+    }
+
+    /// Number of jobs that produced an `action_taken`.
+    pub fn acted_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|o| o.action_taken.is_some())
+            .count()
     }
 }
 
@@ -317,8 +354,11 @@ mod tests {
             config: &test_config(),
             state: &test_state(),
         };
-        let outcomes = r.run_all(&ctx).await;
-        assert_eq!(outcomes.len(), 2);
+        let report = r.run_all(&ctx).await;
+        assert_eq!(report.outcomes.len(), 2);
+        assert_eq!(report.error_count, 0);
+        assert!(!report.had_errors());
+        assert_eq!(report.acted_count(), 0);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
@@ -339,8 +379,9 @@ mod tests {
             config: &test_config(),
             state: &test_state(),
         };
-        let outcomes = r.run_all(&ctx).await;
-        assert_eq!(outcomes.len(), 1);
+        let report = r.run_all(&ctx).await;
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.error_count, 0);
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -357,10 +398,12 @@ mod tests {
             config: &test_config(),
             state: &test_state(),
         };
-        let outcomes = r.run_all(&ctx).await;
+        let report = r.run_all(&ctx).await;
         // The failing job returns Err (absorbed by the registry);
         // the counter job still runs and returns an outcome.
-        assert_eq!(outcomes.len(), 1);
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.error_count, 1);
+        assert!(report.had_errors());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 

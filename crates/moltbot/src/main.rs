@@ -30,10 +30,12 @@
 //! - [`job`] — the [`job::Job`] trait + [`job::JobRegistry`] dispatcher
 //! - [`jobs`] — built-in [`job::Job`] implementations
 //! - [`safe_mode`] — low-balance detection; skips paid actions
+//! - [`audit`] — local SQLite audit log (runs, actions, x402 payments)
 //!
 //! Public re-exports in the crate root make the structure available
 //! to integration tests under `tests/`.
 
+pub mod audit;
 pub mod config;
 pub mod job;
 pub mod jobs;
@@ -48,6 +50,7 @@ use std::sync::Arc;
 use keeperhub_rs::mcp::{McpClient, DEFAULT_MCP_URL};
 use tracing_subscriber::EnvFilter;
 
+use crate::audit::AuditLog;
 use crate::config::AgentConfig;
 use crate::job::JobRegistry;
 use crate::jobs::morpho_health::MorphoHealthJob;
@@ -98,6 +101,9 @@ USAGE:
 ENV:
     KEEPERHUB_API_KEY    KeeperHub API key (Bearer). Required.
     MOLTBOT_CONFIG       Path to a TOML config file. Optional.
+    MOLTBOT_AUDIT_DB     SQLite URL for the audit log. Optional.
+                         Default: 'sqlite:./moltbot.db'. Set to
+                         'sqlite::memory:' for an in-memory DB.
     RUST_LOG             Standard tracing-subscriber filter, e.g.
                          'info', 'moltbot=debug'. Default: 'info'.
 
@@ -183,7 +189,23 @@ async fn main() -> anyhow::Result<()> {
         "job registry built"
     );
 
-    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs);
+    // Open the audit log. The default is a file-backed SQLite
+    // DB at `./moltbot.db`; override with the `MOLTBOT_AUDIT_DB`
+    // env var (e.g. `sqlite::memory:` for ephemeral runs).
+    let audit_url = std::env::var("MOLTBOT_AUDIT_DB")
+        .unwrap_or_else(|_| "sqlite:./moltbot.db".to_string());
+    let audit = match AuditLog::connect(&audit_url).await {
+        Ok(log) => {
+            tracing::info!(url = %audit_url, "audit log opened");
+            Some(std::sync::Arc::new(log))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, url = %audit_url, "audit log open failed; running without persistence");
+            None
+        }
+    };
+
+    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs, audit);
     let _shutdown = loop_.shutdown_handle();
 
     let iterations = loop_.run().await;
