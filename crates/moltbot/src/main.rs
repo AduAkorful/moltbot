@@ -27,11 +27,15 @@
 //! - [`state`] — in-memory agent state (USDC balance, iteration, safe mode)
 //! - [`tick`] — the main tick loop with SIGINT shutdown
 //! - [`yield_strategy`] — Aave V3 supply/withdraw decision + execution
+//! - [`job`] — the [`job::Job`] trait + [`job::JobRegistry`] dispatcher
+//! - [`jobs`] — built-in [`job::Job`] implementations
 //!
 //! Public re-exports in the crate root make the structure available
 //! to integration tests under `tests/`.
 
 pub mod config;
+pub mod job;
+pub mod jobs;
 pub mod state;
 pub mod tick;
 pub mod yield_strategy;
@@ -43,6 +47,8 @@ use keeperhub_rs::mcp::{McpClient, DEFAULT_MCP_URL};
 use tracing_subscriber::EnvFilter;
 
 use crate::config::AgentConfig;
+use crate::job::JobRegistry;
+use crate::jobs::morpho_health::MorphoHealthJob;
 use crate::state::new_shared_state;
 use crate::tick::AgentLoop;
 
@@ -108,6 +114,8 @@ CONFIG FILE:
     safe_mode_threshold_usd = 5.0
     # wallet_address = \"0x...\"  # defaults to the org creator wallet
     # usdc_address   = \"0x...\"  # defaults to USDC on Ethereum mainnet
+    # morpho_market_id = \"0x...\"  # enables the Morpho health-factor job
+    # morpho_target_hf = 1.3
 ",
         version = env!("CARGO_PKG_VERSION"),
     );
@@ -162,7 +170,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(url = %client.url(), "MCP session established");
 
     let state = new_shared_state();
-    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config));
+
+    // Build the job registry. Add new jobs here with
+    // `JobRegistry::with(MyJob::new())`. A second job (e.g.
+    // `PriceAlertJob`) is a ~30-line `impl Job` block + one line
+    // here; the loop dispatcher is unchanged.
+    let jobs = JobRegistry::new().with(MorphoHealthJob::new());
+    tracing::info!(
+        job_count = jobs.len(),
+        "job registry built"
+    );
+
+    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs);
     let _shutdown = loop_.shutdown_handle();
 
     let iterations = loop_.run().await;

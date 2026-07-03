@@ -87,6 +87,15 @@ fn default_usdc_address() -> String {
     "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()
 }
 
+/// Default Morpho health-factor target. Below this, the
+/// [`crate::jobs::morpho_health::MorphoHealthJob`] calls
+/// `morpho/supply-collateral` to top up the position. The chosen
+/// value (1.3) is conservative — Morpho's recommended target is
+/// 1.2-1.5 depending on the collateral's volatility.
+fn default_morpho_target_hf() -> f64 {
+    1.3
+}
+
 /// The agent's runtime configuration.
 ///
 /// Built by [`AgentConfig::from_env_and_file`]. All fields except
@@ -136,6 +145,19 @@ pub struct AgentConfig {
     /// USDC is `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`).
     #[serde(default = "default_usdc_address")]
     pub usdc_address: String,
+
+    /// Optional Morpho Blue market id (the 32-byte keccak256 hex
+    /// string, e.g. `"0x54efc...0c1b8f"`) to monitor with the
+    /// Morpho health-factor job. When `None`, the job is disabled
+    /// (its `should_run` returns `false`).
+    #[serde(default)]
+    pub morpho_market_id: Option<String>,
+
+    /// Health-factor target for the Morpho health-factor job. When
+    /// the monitored position's HF drops below this, the job calls
+    /// `morpho/supply-collateral` to top it up. Default: 1.3.
+    #[serde(default = "default_morpho_target_hf")]
+    pub morpho_target_hf: f64,
 }
 
 impl Default for AgentConfig {
@@ -149,6 +171,8 @@ impl Default for AgentConfig {
             safe_mode_threshold_usd: default_safe_mode_threshold(),
             wallet_address: default_wallet_address(),
             usdc_address: default_usdc_address(),
+            morpho_market_id: None,
+            morpho_target_hf: default_morpho_target_hf(),
         }
     }
 }
@@ -386,5 +410,30 @@ mod tests {
             c.usdc_address,
             "0x2222222222222222222222222222222222222222"
         );
+    }
+
+    #[test]
+    fn morpho_market_id_defaults_to_none() {
+        let c = AgentConfig {
+            keeperhub_api_key: Some("kh_test".to_string()),
+            ..AgentConfig::default()
+        };
+        assert!(c.morpho_market_id.is_none());
+        assert!((c.morpho_target_hf - 1.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_overrides_morpho_config() {
+        let text = r#"
+            keeperhub_api_key = "kh_test"
+            morpho_market_id = "0x54efc345a0180ad8a99ae62b1c626e0d2e46a4d3936d36e8b54df7fb3d0c1b8f"
+            morpho_target_hf = 1.5
+        "#;
+        let c: AgentConfig = toml::from_str(text).unwrap();
+        assert_eq!(
+            c.morpho_market_id.as_deref(),
+            Some("0x54efc345a0180ad8a99ae62b1c626e0d2e46a4d3936d36e8b54df7fb3d0c1b8f")
+        );
+        assert!((c.morpho_target_hf - 1.5).abs() < 1e-9);
     }
 }
