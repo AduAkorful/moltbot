@@ -73,6 +73,20 @@ fn default_safe_mode_threshold() -> f64 {
     5.0
 }
 
+/// Default wallet address — the KeeperHub org's creator wallet
+/// (Sepolia, Turnkey-managed). Used as `on_behalf_of` for Aave
+/// supplies and `to` for Aave withdrawals. Override per-environment
+/// for mainnet / Base / etc.
+fn default_wallet_address() -> String {
+    "0x54F9Fe5A1f63064fc083928df60A95db2dc2CE39".to_string()
+}
+
+/// Default USDC contract address — USDC on Ethereum mainnet.
+/// Override per-network (Base: `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`).
+fn default_usdc_address() -> String {
+    "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48".to_string()
+}
+
 /// The agent's runtime configuration.
 ///
 /// Built by [`AgentConfig::from_env_and_file`]. All fields except
@@ -110,6 +124,18 @@ pub struct AgentConfig {
     /// (skips all paid actions and onchain txs). Default: 5.0.
     #[serde(default = "default_safe_mode_threshold")]
     pub safe_mode_threshold_usd: f64,
+
+    /// Wallet address used as the `on_behalf_of` (supply) and `to`
+    /// (withdraw) for Aave V3 operations. Defaults to the org's
+    /// creator wallet on Sepolia. Override for mainnet / Base.
+    #[serde(default = "default_wallet_address")]
+    pub wallet_address: String,
+
+    /// USDC contract address on `network`. Defaults to USDC on
+    /// Ethereum mainnet. Override when changing `network` (e.g. Base
+    /// USDC is `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`).
+    #[serde(default = "default_usdc_address")]
+    pub usdc_address: String,
 }
 
 impl Default for AgentConfig {
@@ -121,6 +147,8 @@ impl Default for AgentConfig {
             park_threshold_usd: default_park_threshold(),
             withdraw_threshold_usd: default_withdraw_threshold(),
             safe_mode_threshold_usd: default_safe_mode_threshold(),
+            wallet_address: default_wallet_address(),
+            usdc_address: default_usdc_address(),
         }
     }
 }
@@ -324,5 +352,39 @@ mod tests {
         "#;
         let err = toml::from_str::<AgentConfig>(text).unwrap_err();
         assert!(err.to_string().contains("bogus_field"));
+    }
+
+    #[test]
+    fn default_wallet_and_usdc_addresses() {
+        let c = AgentConfig {
+            keeperhub_api_key: Some("kh_test".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(
+            c.wallet_address,
+            "0x54F9Fe5A1f63064fc083928df60A95db2dc2CE39"
+        );
+        assert_eq!(
+            c.usdc_address,
+            "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+        );
+    }
+
+    #[test]
+    fn parse_overrides_wallet_and_usdc_addresses() {
+        let text = r#"
+            keeperhub_api_key = "kh_test"
+            wallet_address = "0x1111111111111111111111111111111111111111"
+            usdc_address = "0x2222222222222222222222222222222222222222"
+        "#;
+        let c: AgentConfig = toml::from_str(text).unwrap();
+        assert_eq!(
+            c.wallet_address,
+            "0x1111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            c.usdc_address,
+            "0x2222222222222222222222222222222222222222"
+        );
     }
 }

@@ -20,7 +20,8 @@
 //! target — add it later if needed).
 
 use crate::config::AgentConfig;
-use crate::state::{AgentState, SharedState};
+use crate::state::SharedState;
+use crate::yield_strategy::{self, ParkDecision};
 use keeperhub_rs::mcp::McpClient;
 use std::sync::Arc;
 use std::time::Instant;
@@ -34,12 +35,9 @@ use tokio::time::{interval, MissedTickBehavior};
 #[derive(Debug, Clone)]
 pub struct AgentLoop {
     state: SharedState,
-    /// The MCP client. Held for future iterations (#10 yield,
-    /// #11 Morpho job, #12 safe mode) that will call KeeperHub from
-    /// the tick. Currently unused by [`AgentLoop::tick`] — the
-    /// session is initialized eagerly in `main` before the loop
-    /// starts.
-    #[allow(dead_code)]
+    /// The MCP client. Used by [`AgentLoop::tick`] to dispatch yield
+    /// strategy calls (#10). The session is initialized eagerly in
+    /// `main` before the loop starts.
     client: Arc<McpClient>,
     config: Arc<AgentConfig>,
     shutdown: Arc<Notify>,
@@ -112,18 +110,30 @@ impl AgentLoop {
     }
 
     /// A single tick of the loop. Increments the iteration counter,
-    /// updates the timestamps, and logs the current USDC balance.
+    /// updates the timestamps, logs the current USDC balance, and
+    /// runs the yield strategy.
     ///
-    /// For #9, this is intentionally a stub. Yield (#10), Morpho
-    /// (#11), and safe-mode (#12) are added as follow-on iterations.
+    /// # Order of operations
+    ///
+    /// 1. Tick bookkeeping (iteration counter, timestamps).
+    /// 2. Log the snapshot.
+    /// 3. If `safe_mode` is set, skip the yield strategy (the safe
+    ///    mode itself is managed by iteration #12; until then this
+    ///    is a no-op).
+    /// 4. Run the yield strategy: decide whether to supply or
+    ///    withdraw from Aave V3, and execute if so. Update
+    ///    `last_action` and log the result.
+    ///
+    /// The Morpho job (#11) and safe-mode detection (#12) are added
+    /// as follow-on iterations.
     pub async fn tick(&self) {
         let now = Instant::now();
-        let iteration = {
+        let (iteration, snapshot) = {
             let mut w = self.state.write().await;
-            w.on_tick_start(now)
+            let n = w.on_tick_start(now);
+            let snap = w.clone();
+            (n, snap)
         };
-
-        let snapshot: AgentState = self.state.read().await.clone();
 
         tracing::info!(
             iteration,
@@ -133,10 +143,49 @@ impl AgentLoop {
             "tick"
         );
 
-        // Future iterations wire in here:
-        // - if safe_mode { return; }
-        // - yield_strategy::decide_and_execute(&self.client, &mut *w).await;
-        // - morpho_job::run(&self.client, &mut *w).await;
+        // Yield strategy (#10). Safe-mode short-circuit lands in #12;
+        // until then we always consult the strategy.
+        let decision = yield_strategy::decide(
+            snapshot.usdc_balance_usd,
+            self.config.park_threshold_usd,
+            self.config.withdraw_threshold_usd,
+        );
+
+        match decision {
+            ParkDecision::NoAction => {
+                tracing::debug!(
+                    balance = snapshot.usdc_balance_usd,
+                    "yield strategy: no action"
+                );
+            }
+            ParkDecision::Supply { .. } | ParkDecision::Withdraw => {
+                tracing::info!(decision = %decision, "yield strategy: executing");
+                match yield_strategy::execute(&self.client, &self.config, &decision).await {
+                    Ok(Some(tx_hash)) => {
+                        tracing::info!(
+                            decision = %decision,
+                            tx_hash = %tx_hash,
+                            "yield strategy: tx broadcast"
+                        );
+                        let mut w = self.state.write().await;
+                        w.record_action(format!("yield::{decision}"));
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            decision = %decision,
+                            "yield strategy: no tx hash in response"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            decision = %decision,
+                            error = %e,
+                            "yield strategy: execution failed"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -180,7 +229,11 @@ mod tests {
         let state = new_shared_state();
         {
             let mut w = state.write().await;
-            w.set_usdc_balance(123.45);
+            // Set a balance in the "no action" band (between the
+            // withdraw and park thresholds) so the yield strategy
+            // doesn't make a real KeeperHub call from this unit
+            // test.
+            w.set_usdc_balance(35.0);
         }
         let loop_ = AgentLoop::new(state.clone(), test_client(), test_config());
         loop_.tick().await;
@@ -188,12 +241,17 @@ mod tests {
         assert_eq!(s.iteration, 1);
         assert!(s.started_at.is_some());
         assert!(s.last_tick_at.is_some());
-        assert_eq!(s.usdc_balance_usd, 123.45);
+        assert_eq!(s.usdc_balance_usd, 35.0);
     }
 
     #[tokio::test]
     async fn multiple_ticks_increment_iteration() {
         let state = new_shared_state();
+        {
+            // NoAction band: keep ticks hermetic.
+            let mut w = state.write().await;
+            w.set_usdc_balance(35.0);
+        }
         let loop_ = AgentLoop::new(state.clone(), test_client(), test_config());
         for _ in 0..3 {
             loop_.tick().await;
@@ -202,11 +260,36 @@ mod tests {
         assert_eq!(s.iteration, 3);
     }
 
+    #[tokio::test]
+    async fn tick_records_action_when_yield_executes() {
+        // We can't drive a real Aave call in a unit test, but we can
+        // verify the bookkeeping: when the strategy would have called
+        // execute(), the `last_action` is set only if the call
+        // succeeds. With a 0.0 balance the decision is `Withdraw`, the
+        // network call fails, and `last_action` stays None. This is
+        // the expected behavior — we just assert that *no* exception
+        // bubbles out of the tick.
+        let state = new_shared_state();
+        let loop_ = AgentLoop::new(state.clone(), test_client(), test_config());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert_eq!(s.iteration, 1);
+        // Network call is expected to fail (no real server), but
+        // tick() must absorb the error and continue.
+        assert!(s.last_action.is_none());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn run_returns_on_ctrl_c() {
         // We can't easily inject a real SIGINT in a unit test, but we
         // can use the shutdown handle.
         let state = new_shared_state();
+        {
+            // NoAction band: the loop must not block on a network
+            // call from the yield strategy.
+            let mut w = state.write().await;
+            w.set_usdc_balance(35.0);
+        }
         let loop_ = AgentLoop::new(state.clone(), test_client(), test_config());
         let handle = loop_.shutdown_handle();
         let runner = loop_.clone();

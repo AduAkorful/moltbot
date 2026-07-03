@@ -26,6 +26,7 @@
 //! - [`config`] — agent configuration loaded from TOML + env
 //! - [`state`] — in-memory agent state (USDC balance, iteration, safe mode)
 //! - [`tick`] — the main tick loop with SIGINT shutdown
+//! - [`yield_strategy`] — Aave V3 supply/withdraw decision + execution
 //!
 //! Public re-exports in the crate root make the structure available
 //! to integration tests under `tests/`.
@@ -33,6 +34,7 @@
 pub mod config;
 pub mod state;
 pub mod tick;
+pub mod yield_strategy;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -99,11 +101,13 @@ OPTIONS:
 CONFIG FILE:
     See `moltbot::config::AgentConfig` for the full schema. Example:
 
-        tick_interval_seconds = 60
-        network = \"1\"
-        park_threshold_usd = 50.0
-        withdraw_threshold_usd = 20.0
-        safe_mode_threshold_usd = 5.0
+    tick_interval_seconds = 60
+    network = \"1\"
+    park_threshold_usd = 50.0
+    withdraw_threshold_usd = 20.0
+    safe_mode_threshold_usd = 5.0
+    # wallet_address = \"0x...\"  # defaults to the org creator wallet
+    # usdc_address   = \"0x...\"  # defaults to USDC on Ethereum mainnet
 ",
         version = env!("CARGO_PKG_VERSION"),
     );
