@@ -726,24 +726,43 @@ Save as `plans/daily/<date>.md` if you want a record.
 
 ---
 
-### #26 — `keeperhub-rs`: publish to crates.io
+### #26 — `keeperhub-rs`: publish to crates.io  **DEFERRED**
 
-**Track:** A · **Priority:** P0 · **Estimate:** S (15min) · **Depends on:** #25
+**Status:** Deferred on 2026-07-04. The crate is publishable (verified
+via `cargo publish --dry-run`); see the "Status" section below.
+The `keeperhub-rs` crate is shipped as a git dependency for the
+hackathon. A crates.io publish is a post-hackathon follow-up.
 
-**Why:** The bounty explicitly rewards ecosystem contributions. Publishing to crates.io is the proof.
+**Why deferred:** The user did not want to authorize the
+crates.io GitHub OAuth scope during the hackathon window. The
+crates.io API token model requires GitHub login to create an
+account, which exposes read access to GitHub orgs. An
+API-only path doesn't exist (the user would still need to
+log in to crates.io to create the token). Git dependencies
+provide the same deliverable (real code, real tests, real
+docs) without the registry.
 
-**What to do:**
-- Get a crates.io API token (https://crates.io/me)
-- `cargo login <token>`
-- `cargo publish -p keeperhub-rs`
-- Verify the crate is live
+**Implication for #27 and #28:** the PR to KeeperHub and the
+tutorial both reference the Git URL, not crates.io. The
+crates.io line in the PR description says "publish pending
+post-hackathon."
 
-**Acceptance criteria:**
-- [ ] Crate is live on https://crates.io/crates/keeperhub-rs
-- [ ] README renders correctly on the crate page
-- [ ] Docs build and are accessible
+**Status (verified 2026-07-04):**
+- `cargo publish --dry-run` passes (22 files, 205 KiB)
+- `cargo doc --no-deps` clean → docs.rs would build
+- `cargo package --list` shows the right files (no
+  target/, no .git/, no plan docs leaking in)
+- All metadata complete: description, keywords, categories,
+  repo URL, docs URL, license (MIT)
 
-**Done =** Live crate on crates.io.
+**Why we wanted it:** The bounty explicitly rewards ecosystem
+contributions, and publishing to crates.io is the strongest
+signal of "this is a real SDK, not a hackathon prototype."
+
+**What unblocks it:** The user is comfortable with the
+crates.io GitHub OAuth scope (or uses a separate GitHub
+account for crates.io). A scoped API token (limited to
+`keeperhub-rs`) is the lowest-risk path.
 
 ---
 
