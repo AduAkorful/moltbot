@@ -2,8 +2,8 @@
 
 > Run through this once to confirm every KeeperHub surface works on your machine. Tick each box. If something fails, the **Trouble** column has the fix.
 
-**Date completed:** ___________
-**KeeperHub account email:** ___________
+**Date completed:** 2026-07-03
+**KeeperHub account email:** _(not recorded for privacy)_
 
 ---
 
@@ -172,24 +172,26 @@ Recommended: **(a) or (b).** Original #5 (M, 4h) and #6 (L, 6h) can both shrink 
 
 ## H. Gas sponsorship check
 
-- [ ] **H1.** In the app, switch to **Ethereum mainnet** network
-- [ ] **H2.** Create a workflow: trigger=Manual, action=web3/transfer-funds, to=some address, amount=0 (just to test)
-- [ ] **H3.** Run it — confirm the tx was sponsored (your wallet wasn't debited gas)
-- [ ] **H4.** Switch back to Sepolia or Base for continued dev
+- [x] **H1.** Used Ethereum mainnet (chain ID `"1"`) for the test workflow.
+- [x] **H2.** Created workflow `H-test-gas-sponsorship` (id `5w6bjq9j92t7ec588ynzb`) via MCP. Action: `web3/transfer-funds` with `amount: "0"`, `recipientAddress: "0x54F9Fe5A1f63064fc083928df60A95db2dc2CE39"` (self), `network: "1"`. **Note:** docs say `toAddress` and `walletId` but the API actually uses `recipientAddress` and an implicit wallet (only one integration configured).
+- [x] **H3.** Executed. Status: **success**, **`sponsored: true`**. Tx: `0x92800cc37ae2ac626090de54b2b3979fae58965a830353323d9c743e727f4db4` (Etherscan). Gas used: 81,279 wei (~$0.20 worth). 5.1s.
+- [x] **H4.** N/A — we don't maintain a global "current network" state via MCP; each call specifies its own `network` field. The user's web UI may still be on Ethereum mainnet from the test; can be switched in the app.
 
 **Trouble:** gas sponsorship is on Ethereum mainnet only. On other chains, you pay gas (cheap on Base/Arbitrum).
+
+**Field-name gotcha for the keeperhub-rs implementation:** the API uses `recipientAddress` (not `toAddress` as the docs say), and the wallet is implicit when only one integration is configured. The Rust client should accept both names and normalize.
 
 ---
 
 ## I. Rust toolchain
 
-- [ ] **I1.** `rustc --version` — 1.75 or newer
-- [ ] **I2.** `cargo --version` — same
-- [ ] **I3.** If outdated: `rustup update stable`
-- [ ] **I4.** (Optional) Install additional components: `rustup component add rustfmt clippy`
-- [ ] **I5.** `cargo install cargo-watch` (optional but useful for `cargo watch -x run`)
-- [ ] **I6.** Clone the moltbot repo: `cd ~/dev && git clone <url> moltbot` (or `cd moltbot` if already there)
-- [ ] **I7.** `cargo check` from the workspace root — should compile cleanly with no errors
+- [x] **I1.** `rustc 1.96.1` (verified earlier in the session).
+- [x] **I2.** `cargo 1.96.1` (same).
+- [x] **I3.** N/A — current.
+- [x] **I4.** `rustfmt` and `clippy` available (via rustup defaults).
+- [ ] **I5.** `cargo-watch` not installed (optional, defer).
+- [x] **I6.** Repo at `~/dev/moltbot` (already cloned).
+- [x] **I7.** `cargo check` from workspace root passes. Only the 4 expected dead-code warnings on the stubs in `keeperhub-rs/src/mcp.rs` (`auth_header`, `http`, `JsonRpcRequest`, `JsonRpcResponse<T>`, `JsonRpcError`).
 
 **Trouble I7:** if compilation fails, run `cargo check --verbose` to see the actual error. Common issues:
 - edition too new for your toolchain → edit Cargo.toml to use edition = "2021"
