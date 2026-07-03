@@ -139,6 +139,7 @@ CONFIG FILE:
     # max_x402_payment_usd = 0.10
     # telegram_bot_token = \"123:abc\"   # or TELEGRAM_BOT_TOKEN env var
     # telegram_chat_id = \"987654321\"
+    # initial_usdc_balance_usd = 60.0   # set to your wallet's USDC for the demo
 ",
         version = env!("CARGO_PKG_VERSION"),
     );
@@ -193,6 +194,20 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(url = %client.url(), "MCP session established");
 
     let state = new_shared_state();
+    // Seed the agent's view of its wallet USDC balance. The
+    // agent tracks positions itself (every successful
+    // supply/withdraw updates `aave_balance_usd` and
+    // `usdc_balance_usd`); this is the starting point.
+    {
+        let mut w = state.write().await;
+        w.set_usdc_balance(config.initial_usdc_balance_usd);
+    }
+    if config.initial_usdc_balance_usd > 0.0 {
+        tracing::info!(
+            initial_usdc_balance_usd = config.initial_usdc_balance_usd,
+            "seeded state with initial USDC balance"
+        );
+    }
 
     // Build the job registry. Add new jobs here with
     // `JobRegistry::with(MyJob::new())`. A second job (e.g.

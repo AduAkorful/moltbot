@@ -207,6 +207,17 @@ pub struct AgentConfig {
     /// alerts to this chat.
     #[serde(default)]
     pub telegram_chat_id: Option<String>,
+
+    /// Initial USDC balance to seed the agent's state at
+    /// startup, in USD. The agent tracks its own positions
+    /// (`aave_balance_usd`) from this starting point — every
+    /// successful supply/withdraw updates the state. The
+    /// default is 0 (operator must set this for any demo
+    /// to make decisions on tick 1). For a $50 Aave
+    /// supply demo, set this to 60 (above the default
+    /// $50 park threshold).
+    #[serde(default)]
+    pub initial_usdc_balance_usd: f64,
 }
 
 impl Default for AgentConfig {
@@ -226,6 +237,7 @@ impl Default for AgentConfig {
             max_x402_payment_usd: default_max_x402_payment_usd(),
             telegram_bot_token: None,
             telegram_chat_id: None,
+            initial_usdc_balance_usd: 0.0,
         }
     }
 }
@@ -521,6 +533,25 @@ mod tests {
         };
         assert!(c.telegram_bot_token.is_none());
         assert!(c.telegram_chat_id.is_none());
+    }
+
+    #[test]
+    fn initial_usdc_balance_defaults_to_zero() {
+        let c = AgentConfig {
+            keeperhub_api_key: Some("kh_test".to_string()),
+            ..AgentConfig::default()
+        };
+        assert_eq!(c.initial_usdc_balance_usd, 0.0);
+    }
+
+    #[test]
+    fn parse_overrides_initial_usdc_balance() {
+        let text = r#"
+            keeperhub_api_key = "kh_test"
+            initial_usdc_balance_usd = 60.0
+        "#;
+        let c: AgentConfig = toml::from_str(text).unwrap();
+        assert!((c.initial_usdc_balance_usd - 60.0).abs() < 1e-9);
     }
 
     #[test]

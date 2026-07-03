@@ -196,8 +196,12 @@ impl AgentLoop {
         // the rest of the tick can branch on the up-to-date
         // `state.safe_mode` value (mutated below, and the
         // snapshot we pass around is the post-mutation copy).
+        // Safe mode uses TOTAL assets (wallet + parked in
+        // Aave/Morpho), not just the wallet's liquid USDC,
+        // so a successful supply doesn't immediately trip
+        // safe mode.
         let safe_change = safe_mode::check(
-            snapshot.usdc_balance_usd,
+            snapshot.total_assets_usd(),
             self.config.safe_mode_threshold_usd,
             snapshot.safe_mode,
         );
@@ -307,8 +311,13 @@ impl AgentLoop {
                 // was refused. Safe mode is reserved for the
                 // $5 floor.
             } else {
+                // Yield strategy uses TOTAL assets (wallet +
+                // parked in Aave). The agent decides based on
+                // its real wealth, not just the spendable
+                // wallet balance — a successful supply of
+                // $60 doesn't make the agent think it's broke.
                 let decision = yield_strategy::decide(
-                    snapshot.usdc_balance_usd,
+                    snapshot.total_assets_usd(),
                     self.config.park_threshold_usd,
                     self.config.withdraw_threshold_usd,
                 );
@@ -330,9 +339,29 @@ impl AgentLoop {
                                     "yield strategy: tx broadcast"
                                 );
                                 let action_label = format!("yield::{decision}");
-                                // Record to in-memory state
+                                // Update in-memory state with the
+                                // post-action position. We track
+                                // the agent's view of its own
+                                // positions here (rather than
+                                // polling onchain) — every
+                                // successful tx moves value
+                                // between wallet and Aave.
                                 {
                                     let mut w = self.state.write().await;
+                                    match &decision {
+                                        ParkDecision::Supply { amount_usd } => {
+                                            w.record_supply(*amount_usd);
+                                        }
+                                        ParkDecision::Withdraw => {
+                                            // Withdraw-all: pull
+                                            // the full aToken
+                                            // balance back to
+                                            // the wallet.
+                                            let aave = w.aave_balance_usd;
+                                            w.record_withdraw(aave);
+                                        }
+                                        ParkDecision::NoAction => {}
+                                    }
                                     w.record_action(action_label.clone());
                                 }
                                 // Record to audit log
