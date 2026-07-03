@@ -30,6 +30,7 @@
 //! - [`job`] — the [`job::Job`] trait + [`job::JobRegistry`] dispatcher
 //! - [`jobs`] — built-in [`job::Job`] implementations
 //! - [`safe_mode`] — low-balance detection; skips paid actions
+//! - [`pre_x402`] — pre-call balance check (defense in depth)
 //! - [`audit`] — local SQLite audit log (runs, actions, x402 payments)
 //! - [`dashboard`] — Axum server rendering the audit log as a live page
 //!
@@ -41,6 +42,7 @@ pub mod config;
 pub mod dashboard;
 pub mod job;
 pub mod jobs;
+pub mod pre_x402;
 pub mod safe_mode;
 pub mod state;
 pub mod tick;
@@ -128,6 +130,7 @@ CONFIG FILE:
     # morpho_market_id = \"0x...\"  # enables the Morpho health-factor job
     # morpho_target_hf = 1.3
     # dashboard_addr = \"127.0.0.1:3030\"
+    # max_x402_payment_usd = 0.10
 ",
         version = env!("CARGO_PKG_VERSION"),
     );

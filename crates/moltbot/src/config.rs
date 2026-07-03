@@ -103,6 +103,15 @@ fn default_dashboard_addr() -> String {
     "127.0.0.1:3030".to_string()
 }
 
+/// Default per-call x402 payment cap, in USD. The agent
+/// refuses to issue a paid KeeperHub call when its current
+/// USDC balance is below this floor. Default: $0.10 — a
+/// typical paid workflow call costs $0.01–$0.05; $0.10 is
+/// the "definitely enough" headroom.
+fn default_max_x402_payment_usd() -> f64 {
+    0.10
+}
+
 /// The agent's runtime configuration.
 ///
 /// Built by [`AgentConfig::from_env_and_file`]. All fields except
@@ -172,6 +181,16 @@ pub struct AgentConfig {
     /// network).
     #[serde(default = "default_dashboard_addr")]
     pub dashboard_addr: String,
+
+    /// Per-call x402 payment cap, in USD. The agent refuses
+    /// to issue a paid KeeperHub call when its current USDC
+    /// balance is below this floor (defense in depth — see
+    /// [`crate::pre_x402`]). This is independent of
+    /// `safe_mode_threshold_usd` ($5 floor that gates the
+    /// whole agent) and is intended to prevent surprise
+    /// over-spends on expensive calls. Default: 0.10.
+    #[serde(default = "default_max_x402_payment_usd")]
+    pub max_x402_payment_usd: f64,
 }
 
 impl Default for AgentConfig {
@@ -188,6 +207,7 @@ impl Default for AgentConfig {
             morpho_market_id: None,
             morpho_target_hf: default_morpho_target_hf(),
             dashboard_addr: default_dashboard_addr(),
+            max_x402_payment_usd: default_max_x402_payment_usd(),
         }
     }
 }
@@ -450,5 +470,24 @@ mod tests {
             Some("0x54efc345a0180ad8a99ae62b1c626e0d2e46a4d3936d36e8b54df7fb3d0c1b8f")
         );
         assert!((c.morpho_target_hf - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn max_x402_payment_defaults_to_ten_cents() {
+        let c = AgentConfig {
+            keeperhub_api_key: Some("kh_test".to_string()),
+            ..AgentConfig::default()
+        };
+        assert!((c.max_x402_payment_usd - 0.10).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_overrides_max_x402_payment() {
+        let text = r#"
+            keeperhub_api_key = "kh_test"
+            max_x402_payment_usd = 0.50
+        "#;
+        let c: AgentConfig = toml::from_str(text).unwrap();
+        assert!((c.max_x402_payment_usd - 0.50).abs() < 1e-9);
     }
 }
