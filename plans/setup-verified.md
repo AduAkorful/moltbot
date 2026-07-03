@@ -52,30 +52,69 @@
 
 ## D. MCP server
 
-- [ ] **D1.** In Claude Code (or your agent), run:
+- [x] **D1.** In Claude Code (or your agent), run:
   ```bash
   claude mcp add --transport http keeperhub https://app.keeperhub.com/mcp \
     --header "Authorization: Bearer $KEEPERHUB_API_KEY"
   ```
-- [ ] **D2.** Restart Claude Code
-- [ ] **D3.** Inside Claude Code, run `/mcp` and confirm the keeperhub server is connected
-- [ ] **D4.** Ask the agent: "List the workflows in my KeeperHub organization." — it should call `list_workflows` and return the list (probably empty)
-- [ ] **D5.** In Claude Code, verify the MCP tools are listed: there should be 19 tools
+  *Not using Claude Code — used direct curl instead. See trouble D1.*
+- [x] **D2.** Restart Claude Code — *N/A (not using Claude Code)*
+- [x] **D3.** Inside Claude Code, run `/mcp` and confirm the keeperhub server is connected — *N/A*
+- [x] **D4.** Ask the agent: "List the workflows in my KeeperHub organization." — `list_workflows` returns `[]` (empty org, as expected)
+- [x] **D5.** In Claude Code, verify the MCP tools are listed: there should be 19 tools — *Actual count is **31 tools** (docs.keeperhub.com says 19 — outdated). Deprecated tools: `search_plugins`, `get_template`. Useful extras: `search_protocol_actions`, `execute_protocol_action`, `list_action_schemas`, `tools_documentation`, `prepare_test_pin_data`.*
 
 **Trouble D1:** if you don't use Claude Code, the MCP server can be hit directly via HTTP (the MoltBot Rust client will do this). For now, just confirm the URL is reachable: `curl -H "Authorization: Bearer $KEEPERHUB_API_KEY" https://app.keeperhub.com/mcp -X POST -H "Content-Type: application/json" -H "Accept: text/event-stream" -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'` — should return the tool list.
+
+**Notes from running D4 directly:**
+- The MCP server uses Streamable HTTP transport. The handshake is **sequential**: `initialize` → `notifications/initialized` → `tools/list` (or `tools/call`).
+- The `initialize` response includes an `Mcp-Session-Id` header containing a **JWT** (24h expiry, ~24h from issuance). Subsequent requests must echo this header. **Design implication for `keeperhub-rs`:** the `McpClient` needs to cache and refresh the session token.
+- All `tools/call` responses wrap data in a `content: [{ type: "text", text: "<json-string>" }]` envelope. The text payload is JSON-stringified. The `McpClient` needs a `unwrap_content()` helper.
+- Direct `tools/call` to `list_workflows` with empty `arguments` returns `{"result": {"content": [{"type": "text", "text": "[]"}]}}`.
 
 ---
 
 ## E. Visual workflow builder
 
-- [ ] **E1.** In the app, create a new workflow: Workflows → New → blank workflow
-- [ ] **E2.** Add a **Manual trigger** (default)
-- [ ] **E3.** Add a **web3/check-balance** action: network=11155111, address=your wallet from B3
-- [ ] **E4.** Save the workflow
-- [ ] **E5.** Click **Run** — execution completes, status=completed
-- [ ] **E6.** Open the run — confirm the output shows your SepoliaETH balance
+- [x] **E1.** Created via MCP `create_workflow` (not the visual builder UI). Workflow: `E-test-sepolia-balance`, id `bsxwjfrctd00y665ie1o9`.
+- [x] **E2.** Manual trigger: `data.config.triggerType = "Manual"`. Confirmed working — `triggerSource: "manual"` in the execution logs.
+- [x] **E3.** `web3/check-balance` action with `network="11155111"`, `address="0x54F9Fe5A1f63064fc083928df60A95db2dc2CE39"`. Wallet has **1.0 SepoliaETH** (1,000,000,000,000,000,000 wei).
+- [x] **E4.** Saved (created via MCP).
+- [x] **E5.** Ran via MCP `execute_workflow`. Status: `success`. Duration: 400ms.
+- [x] **E6.** Output: `{"address": "0x54F9...CE39", "balance": "1.0", "success": true, "balanceWei": "1000000000000000000", "addressLink": "https://sepolia.etherscan.io/address/0x54F9...CE39"}`. Confirmed via MCP `get_execution`.
+- [ ] **E7.** *Workflow NOT deleted — KeeperHub refuses: "Workflow has execution history. Delete executions first before deleting the workflow."* This is by design — execution history is the audit trail. Leaving the test workflow in place; can prune via the app UI later.
 
-This proves the visual builder works. You can delete this workflow after.
+**Key MCP findings for `keeperhub-rs` (E2–E6 roundtrip):**
+
+| Tool | Args | Returns |
+|---|---|---|
+| `create_workflow` | `name`, `description`, `nodes[]`, `edges[]` (projectId optional) | `{ id, name, enabled: false, isListed: false, projectId: null, ... }` |
+| `execute_workflow` | `workflowId` | `{ executionId, status: "running" }` |
+| `get_execution` | `executionId` | `{ status: { status, nodeStatuses[], progress, ... }, logs: { execution: { id, workflowId, status, input, output, startedAt, completedAt, duration, runId, transactionHashes[], gasUsedWei, triggeredByOrgApiKeyId, triggerSource, triggeredByCredentialType, ... } } }` |
+
+**Node shape** (from the real Aave template + our test):
+```json
+{
+  "id": "trigger-1" | "node-N",
+  "type": "trigger" | "action",
+  "position": { "x": 0, "y": 0 },
+  "data": {
+    "type": "trigger" | "action",
+    "label": "Human label",
+    "config": { /* triggerType OR actionType + required fields */ }
+  }
+}
+```
+
+**Edge shape:**
+```json
+{ "id": "e1", "source": "trigger-1", "target": "node-1" }
+```
+
+**Important for `types.rs`:** the API returns more fields than the existing `Workflow` struct has — `slug`, `isListed`, `projectId`, `tagId`, `userId`, `organizationId`, `nodes`, `edges`, `enabled`. The struct will need to grow for #2, #13, and #25 (publish).
+
+**Important for `types.rs` Execution:** the API Execution has `triggeredByOrgApiKeyId`, `triggerSource`, `triggeredByCredentialType`, `lastSuccessfulNodeId/Name`, `executionTrace[]`, `runId`, `billable`, `executedWorkflowHash`, plus a nested `workflow` object. The audit log (#14) needs most of these.
+
+**Polling note:** `get_execution.status.status` is `"success"` (or `running`/`failed`/`cancelled`) — there is no separate top-level `status` string at the top of the response.
 
 ---
 

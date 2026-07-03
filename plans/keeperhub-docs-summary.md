@@ -89,35 +89,51 @@ claude mcp add --transport http keeperhub https://app.keeperhub.com/mcp \
   --header "Authorization: Bearer kh_your_key_here"
 ```
 
-### 5.1 Tools (19 total)
+### 5.1 Tools (31 total as of v1.2.0; docs say 19 — outdated)
 
 **Workflow management:**
-- `list_workflows` — list org workflows (paginated)
-- `get_workflow` — get full config by ID
+- `list_workflows` — list org workflows (paginated, with `projectId` filter)
+- `get_workflow` — get full config (nodes, edges) by ID
 - `create_workflow` — create from explicit nodes/edges
 - `update_workflow` — modify existing
 - `delete_workflow` — remove
+- `validate_workflow` — pre-flight structural/Web3 validation
+- `prepare_test_pin_data` — return JSON Schema per node, for agent test data
 
 **Execution:**
 - `execute_workflow` — manually trigger, returns execution ID
-- `get_execution_status` — pending/running/completed/failed
-- `get_execution_logs` — full logs incl. tx hashes, errors
+- `get_execution` — combined status + step logs (replaces `get_execution_status` + `get_execution_logs`)
 
 **AI generation:**
 - `ai_generate_workflow` — natural-language workflow creation
 
 **Discovery:**
 - `list_action_schemas` — list action types by category
-- `search_plugins` — find plugins
+- `search_plugins` ⚠️ *DEPRECATED in v1.13 — use `list_action_schemas`*
 - `get_plugin` — full plugin docs
-- `validate_plugin_config` — schema validation
 - `search_templates` — pre-built workflows
-- `get_template` — template metadata
+- `get_template` ⚠️ *DEPRECATED in v1.13 — use `get_workflow`*
 - `deploy_template` — deploy to your account
 
 **Integrations:**
 - `list_integrations` — configured integrations
 - `get_wallet_integration` — wallet ID for write ops
+
+**Direct DeFi (NEW — important for MoltBot):**
+- `search_protocol_actions` — list supported DeFi actions across protocols (Aave, Morpho, etc.)
+- `execute_protocol_action` — execute a DeFi action directly (e.g. Aave supply/withdraw, Morpho borrow/repay) without building a workflow
+- `execute_transfer` — transfer native or ERC20
+- `execute_contract_call` — call any contract function (read or write)
+- `execute_check_and_execute` — read → evaluate condition → execute
+- `get_direct_execution_status` — status of a direct exec
+
+**Marketplace (the paying-customer path):**
+- `search_workflows` — discover listed workflows
+- `call_workflow` — invoke a listed workflow (returns 402 for paid)
+- `list_workflow` — publish your workflow to the catalog
+- `unlist_workflow` — remove from catalog
+- `update_workflow_listing` — edit listing metadata
+- `get_workflow_listing` — read listing metadata by slug
 
 **Documentation:**
 - `tools_documentation` — tool docs
@@ -125,6 +141,24 @@ claude mcp add --transport http keeperhub https://app.keeperhub.com/mcp \
 **Resources (read-only):**
 - `keeperhub://workflows` — list
 - `keeperhub://workflows/{id}` — full config
+
+**Architectural note for `keeperhub-rs` (discovered during D4):**
+The MCP server uses **Streamable HTTP** transport. The `initialize` call returns an `Mcp-Session-Id` header (a **JWT, 24h expiry**); subsequent calls must echo it. `tools/call` responses wrap data in a `content: [{ type: "text", text: "<json-stringified>" }]` envelope. The `McpClient` needs a session cache + an `unwrap_content()` helper.
+
+**Architectural note for `keeperhub-rs` (discovered during E2–E6):**
+A workflow = `nodes[]` (each `{id, type, position, data: {type, label, config}}`) + `edges[]` (each `{id, source, target}`). Trigger nodes have `data.config.triggerType` (e.g. `Manual`, `Schedule`). Action nodes have `data.config.actionType` (e.g. `web3/check-balance`) + the required fields inline (no nested `inputs` object).
+
+`execute_workflow` returns `{executionId, status: "running"}` — always running at first; poll `get_execution` until terminal. The response shape:
+```json
+{
+  "status": { "status": "success|running|failed|cancelled", "nodeStatuses": [...], "progress": {...}, "transactionHashes": [] },
+  "logs": { "execution": { "id", "workflowId", "status", "input", "output", "startedAt", "completedAt", "duration", "runId", "transactionHashes", "gasUsedWei", "triggeredByOrgApiKeyId", "triggerSource", "triggeredByCredentialType", "lastSuccessfulNodeId", "lastSuccessfulNodeName", "executionTrace", "billable", "executedWorkflowHash", "workflow": {...full embedded workflow...} } }
+}
+```
+
+Workflows with execution history cannot be deleted via the API ("Delete executions first") — this is by design (audit trail is non-erasable). New workflows are `enabled: false` and `isListed: false` by default.
+
+**Strategic simplification for #7/#8:** `execute_protocol_action` can replace building the Aave/Morpho workflows in the visual builder for our own yield strategy. Visual-builder workflows are still needed for #25-28 (bounty publish) and for any workflow we want to *charge* others to call. **Worth discussing at #7.**
 
 ### 5.2 Per-workflow MCP servers
 

@@ -1,19 +1,21 @@
 //! Model Context Protocol (MCP) client for KeeperHub.
 //!
 //! The KeeperHub MCP server is a JSON-RPC 2.0 endpoint over HTTP that
-//! exposes 19 tools for workflow management, execution, discovery, and
-//! AI-assisted workflow generation. The full reference is in the docs:
+//! exposes 31 tools (docs claim 19 — outdated as of v1.2.0). The full
+//! reference is at <https://docs.keeperhub.com/ai-tools/mcp-server>.
 //!
-//! <https://docs.keeperhub.com/ai-tools/mcp-server>
-//!
-//! # Tools
+//! # Tools (abridged — see `keeperhub-docs-summary.md` for full list)
 //!
 //! - **Workflow management:** `list_workflows`, `get_workflow`, `create_workflow`,
-//!   `update_workflow`, `delete_workflow`
-//! - **Execution:** `execute_workflow`, `get_execution_status`, `get_execution_logs`
+//!   `update_workflow`, `delete_workflow`, `validate_workflow`, `prepare_test_pin_data`
+//! - **Execution:** `execute_workflow`, `get_execution`
 //! - **AI generation:** `ai_generate_workflow`
-//! - **Discovery:** `list_action_schemas`, `search_plugins`, `get_plugin`,
-//!   `validate_plugin_config`, `search_templates`, `get_template`, `deploy_template`
+//! - **Discovery:** `list_action_schemas`, `get_plugin`, `search_templates`, `deploy_template`
+//! - **Direct DeFi:** `search_protocol_actions`, `execute_protocol_action`,
+//!   `execute_transfer`, `execute_contract_call`, `execute_check_and_execute`,
+//!   `get_direct_execution_status`
+//! - **Marketplace (x402):** `search_workflows`, `call_workflow`, `list_workflow`,
+//!   `unlist_workflow`, `update_workflow_listing`, `get_workflow_listing`
 //! - **Integrations:** `list_integrations`, `get_wallet_integration`
 //! - **Documentation:** `tools_documentation`
 //!
