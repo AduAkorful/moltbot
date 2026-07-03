@@ -41,7 +41,8 @@
 //! and the session is reused until it expires or the server returns 401.
 
 use crate::error::{Error, Result};
-use crate::types::Workflow;
+use crate::types::{CallWorkflowResult, Workflow};
+use crate::x402::parse_challenge;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -146,6 +147,51 @@ impl McpClient {
                 "list_workflows: failed to parse response as Vec<Workflow>: {e}; body: {text}"
             ))
         })
+    }
+
+    /// Call a marketplace workflow by slug.
+    ///
+    /// For **free** workflows, returns the [`CallWorkflowResult`] with
+    /// `executionId`, `status`, `output`, and optional ERC-8004
+    /// `feedback` prompt.
+    ///
+    /// For **paid** workflows, returns
+    /// [`Error::X402Unpaid`] with the parsed [`PaymentChallenge`].
+    /// Callers should then either:
+    ///
+    /// 1. Invoke the KeeperHub agentic wallet's MCP server
+    ///    (`mcp__plugin_keeperhub_wallet__call_workflow`) to auto-pay
+    ///    and retry, or
+    /// 2. Surface a 402 prompt to the operator.
+    ///
+    /// The Rust client does **not** reimplement EIP-3009 signing —
+    /// see [`crate::x402`] for why.
+    pub async fn call_workflow(&self, slug: &str, inputs: Value) -> Result<CallWorkflowResult> {
+        match self
+            .tools_call_text(
+                "call_workflow",
+                json!({ "slug": slug, "inputs": inputs }),
+            )
+            .await
+        {
+            Ok(text) => serde_json::from_str(&text).map_err(|e| {
+                Error::Internal(format!(
+                    "call_workflow({slug}): failed to parse response as CallWorkflowResult: {e}; body: {text}"
+                ))
+            }),
+            Err(Error::Api { status: 402, message }) => {
+                let challenge = extract_challenge_from_402(&message).ok_or_else(|| {
+                    Error::Mcp(format!(
+                        "call_workflow({slug}): 402 returned but could not parse x402 challenge: {message}"
+                    ))
+                })?;
+                Err(Error::X402Unpaid {
+                    slug: slug.to_string(),
+                    challenge: Box::new(challenge),
+                })
+            }
+            Err(other) => Err(other),
+        }
     }
 
     /// Initialize the MCP session (handshake).
@@ -401,6 +447,22 @@ fn parse_api_error_text(text: &str) -> (u16, String) {
     (500, text.to_string())
 }
 
+/// Extract an x402 challenge from a 402 error message.
+///
+/// Expects the format `"API call failed: 402 Payment Required - {json}"`.
+/// Returns `None` if the message doesn't match the expected shape or the
+/// JSON can't be parsed as a [`PaymentChallenge`].
+fn extract_challenge_from_402(message: &str) -> Option<crate::types::PaymentChallenge> {
+    let (status, _) = parse_api_error_text(message);
+    if status != 402 {
+        return None;
+    }
+    // Find " - " separator. The challenge JSON comes after.
+    let dash_idx = message.find(" - ")?;
+    let json_str = message.get(dash_idx + 3..)?;
+    parse_challenge(json_str).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +516,26 @@ mod tests {
             parse_api_error_text("something weird happened"),
             (500, "something weird happened".to_string())
         );
+    }
+
+    #[test]
+    fn extract_challenge_from_402_parses_well_formed_body() {
+        let msg = r#"API call failed: 402 Payment Required - {"protocol":"x402","amount":"10000","asset":"0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913","chainId":8453,"payTo":"0xabc","nonce":"0xn","validAfter":0,"validBefore":9999999999,"resource":"my-workflow"}"#;
+        let challenge = extract_challenge_from_402(msg).expect("should parse");
+        assert_eq!(challenge.amount, "10000");
+        assert_eq!(challenge.chain_id, 8453);
+        assert_eq!(challenge.resource.as_deref(), Some("my-workflow"));
+    }
+
+    #[test]
+    fn extract_challenge_from_402_rejects_non_402() {
+        let msg = "API call failed: 503 Service Unavailable - {}";
+        assert!(extract_challenge_from_402(msg).is_none());
+    }
+
+    #[test]
+    fn extract_challenge_from_402_rejects_malformed_json() {
+        let msg = "API call failed: 402 Payment Required - not json at all";
+        assert!(extract_challenge_from_402(msg).is_none());
     }
 }

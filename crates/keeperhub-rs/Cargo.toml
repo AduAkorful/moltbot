@@ -35,3 +35,7 @@ live-mcp = []
 [[example]]
 name = "list_workflows"
 path = "examples/list_workflows.rs"
+
+[[example]]
+name = "call_workflow"
+path = "examples/call_workflow.rs"

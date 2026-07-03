@@ -1,5 +1,6 @@
 //! Error types for the KeeperHub Rust client.
 
+use crate::types::PaymentChallenge;
 use thiserror::Error;
 
 /// The error type returned by all fallible operations in this crate.
@@ -18,10 +19,20 @@ pub enum Error {
         message: String,
     },
 
-    /// The KeeperHub API returned an x402 Payment Required challenge that we
-    /// could not satisfy (e.g. amount exceeds the auto-approve threshold).
-    #[error("x402 payment required but unhandled: {0}")]
-    X402Unpaid(String),
+    /// The KeeperHub API returned an x402 / MPP 402 challenge (the workflow
+    /// is paid and we did not supply payment).
+    ///
+    /// Callers should inspect the [`PaymentChallenge`] and either:
+    /// 1. Use the KeeperHub agentic wallet (`mcp__plugin_keeperhub_wallet__call_workflow`)
+    ///    to auto-pay, or
+    /// 2. Surface a 402 prompt to the operator.
+    #[error("paid workflow '{slug}': {challenge}")]
+    X402Unpaid {
+        /// The slug of the workflow that required payment.
+        slug: String,
+        /// The parsed payment challenge. Boxed to keep the `Result` type small.
+        challenge: Box<PaymentChallenge>,
+    },
 
     /// Configuration error (missing env var, invalid URL, etc.).
     #[error("configuration error: {0}")]

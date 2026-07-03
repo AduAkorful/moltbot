@@ -301,3 +301,91 @@ pub struct LogEntry {
     #[serde(default)]
     pub error: Option<String>,
 }
+
+/// The payment protocol used by a 402 challenge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaymentProtocol {
+    /// HTTP 402 + EIP-3009 `TransferWithAuthorization` on Base.
+    X402,
+    /// MPP on Tempo (Tempo's native payment protocol).
+    Mpp,
+}
+
+/// A parsed x402 / MPP 402 challenge body, returned in
+/// [`crate::error::Error::X402Unpaid`] when a paid workflow is called
+/// without supplying payment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentChallenge {
+    /// The payment protocol.
+    pub protocol: PaymentProtocol,
+
+    /// The amount to pay, in atomic units of the asset (e.g. `50000` = $0.05 USDC).
+    pub amount: String,
+
+    /// The asset contract address.
+    pub asset: String,
+
+    /// The chain ID where the payment should settle.
+    pub chain_id: u64,
+
+    /// The facilitator's address that will receive the funds.
+    pub pay_to: String,
+
+    /// A unique nonce for this payment.
+    pub nonce: String,
+
+    /// Unix timestamp after which the authorization expires.
+    pub valid_after: u64,
+
+    /// Unix timestamp before which the authorization is valid.
+    pub valid_before: u64,
+
+    /// Optional resource identifier (the workflow being paid for).
+    #[serde(default)]
+    pub resource: Option<String>,
+}
+
+impl std::fmt::Display for PaymentChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} chain={} amount={} asset={} pay_to={}",
+            match self.protocol {
+                PaymentProtocol::X402 => "x402",
+                PaymentProtocol::Mpp => "MPP",
+            },
+            self.chain_id,
+            self.amount,
+            self.asset,
+            self.pay_to,
+        )?;
+        if let Some(r) = &self.resource {
+            write!(f, " resource={r}")?;
+        }
+        Ok(())
+    }
+}
+
+/// The result of a successful free `call_workflow` invocation.
+///
+/// For paid workflows, `call_workflow` returns
+/// [`crate::error::Error::X402Unpaid`] instead of this struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallWorkflowResult {
+    /// Unique execution ID (pollable via `get_execution` for status).
+    pub execution_id: String,
+
+    /// Execution status. For free read workflows, typically `"success"`.
+    pub status: String,
+
+    /// The workflow's output. Shape is workflow-specific.
+    pub output: serde_json::Value,
+
+    /// Optional ERC-8004 feedback prompt (KeeperHub auto-registers
+    /// executed workflows on the 8004scan reputation registry).
+    #[serde(default)]
+    pub feedback: Option<serde_json::Value>,
+}

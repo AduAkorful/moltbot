@@ -76,3 +76,45 @@ async fn list_workflows_with_bad_key_fails_with_api_error() {
         other => panic!("expected Error::Api or Error::Mcp, got {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn call_workflow_executes_a_free_listed_workflow() {
+    use serde_json::json;
+
+    let c = client();
+    // `sep-eth-balance-test` is the free test workflow we created during
+    // setup. It returns the Sepolia ETH balance of a hard-coded address
+    // and takes no inputs. It must be listed + enabled in the org.
+    let result = c
+        .call_workflow("sep-eth-balance-test", json!({}))
+        .await
+        .expect("free call_workflow should succeed");
+
+    assert!(!result.execution_id.is_empty(), "execution_id should be non-empty");
+    assert_eq!(result.status, "success", "free call should be synchronous-success");
+    // The output is the workflow's structured result. For our test
+    // workflow it includes a `balance` field (string, ETH).
+    let output = &result.output;
+    assert!(
+        output.get("balance").is_some(),
+        "expected 'balance' in output, got: {output}"
+    );
+    assert!(output.get("success").is_some(), "expected 'success' flag in output");
+}
+
+#[tokio::test]
+async fn call_workflow_returns_404_for_nonexistent_slug() {
+    use serde_json::json;
+
+    let c = client();
+    let err = c
+        .call_workflow("this-workflow-definitely-does-not-exist-xyz123", json!({}))
+        .await
+        .expect_err("call_workflow with bad slug should fail");
+    // We don't pin the exact error shape (could be 404 from the API or
+    // 422 from the marketplace registry). Just require it errors.
+    assert!(
+        matches!(err, keeperhub_rs::Error::Api { .. } | keeperhub_rs::Error::Mcp(_)),
+        "expected Error::Api or Error::Mcp, got {err:?}"
+    );
+}
