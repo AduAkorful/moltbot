@@ -31,8 +31,8 @@ Tracks A and B are independent (no blockers between them). Track C depends on A.
 | 2 | keeperhub-rs: implement `list_workflows` | A | P0 | M | #1 |
 | 3 | keeperhub-rs: implement `call_workflow` (free) | A | P0 | M | #2 |
 | 4 | keeperhub-rs: implement `get_execution_logs` | A | P0 | S | #2 |
-| 5 | keeperhub-rs: x402 EIP-3009 builder | A | P0 | M | #1 |
-| 6 | keeperhub-rs: `call_paid_workflow` with x402 auto-pay | A | P0 | L | #3, #5 |
+| 5 | keeperhub-rs: x402 challenge parser + thin wallet-client wrapper | A | P0 | S | #1 |
+| 6 | keeperhub-rs: `call_paid_workflow` via wallet MCP | A | P0 | S | #3, #5 |
 | 7 | `keeperhub-rs`: Aave direct call via `execute_protocol_action` | A | P0 | S | #1, Aave integration |
 | 7b | Build + publish one marketplace workflow (visual builder) | B | P0 | M | #1 |
 | 8 | `keeperhub-rs`: Morpho direct call via `execute_protocol_action` + HF calc | A | P0 | S | #1, Morpho integration |
@@ -74,7 +74,7 @@ Chain 1 (keeperhub-rs core):     #1 → #2 → #3 → #4, #13
 Chain 2 (KeeperHub workflows):   #1 → #7b (and #11b in parallel)
 Chain 3 (moltbot agent):         #2 → #9 → #10, #11, #12
                                             ↘ #14 → #15
-Chain 4 (build + demo):          #6, #7, #8, #7b, #10, #11 → #16, #17, #18 → #19 → #20, #21 → #22
+Chain 4 (build + demo):          #5, #6, #7, #8, #7b, #10, #11 → #16, #17, #18 → #19 → #20, #21 → #22
 Chain 5 (bounty):                #6, #13 → #25 → #26 → #27, #28
 ```
 
@@ -201,50 +201,53 @@ Save as `plans/daily/<date>.md` if you want a record.
 
 ---
 
-### #5 — `keeperhub-rs`: x402 EIP-3009 builder
+### #5 — `keeperhub-rs`: x402 challenge parser + thin wallet-client wrapper
 
-**Track:** A · **Priority:** P0 · **Estimate:** M (4h) · **Depends on:** #1
+**Track:** A · **Priority:** P0 · **Estimate:** S (1.5h) · **Depends on:** #1
 
-**Why:** The auto-pay mechanism. Without signing EIP-3009, the agent can't pay for paid workflows.
+**Why:** The auto-pay mechanism — but we delegate the actual signing to the KeeperHub agentic wallet's MCP server (`mcp__plugin_keeperhub_wallet__call_workflow`), which already auto-pays x402 (Base USDC) and MPP (Tempo USDC.e) 402 challenges. We only need to parse the 402 challenge to extract metadata (price, network, asset) for logging, and provide a thin wrapper that shells out to the wallet's MCP tool for paid calls.
 
 **What to do:**
-- Implement `parse_challenge` in `x402.rs` (already has a stub)
-- Implement `build_payment_header` (returns base64-encoded JSON of `{signature, authorization}`)
-- Add a `PaymentSigner` trait that abstracts the signing backend
-- Add a `KeeperHubProxySigner` that calls the KeeperHub signing endpoint (Turnkey-mediated) — this is what avoids holding private keys locally
-- Add a `LocalSigner` (with `alloy-rs`) as a fallback for self-custody path (skeleton only — full impl is post-hackathon)
+- Implement `parse_challenge` in `x402.rs` (already a stub). Returns a typed `PaymentChallenge { price, network, asset, recipient, ... }`
+- Add a `WalletMcpSigner` that spawns the wallet CLI (`npx -p @keeperhub/wallet keeperhub-wallet`) or calls its MCP server. NOT a full EIP-3009 implementation.
+- Keep the `PaymentSigner` trait from the original plan — `WalletMcpSigner` is one impl, future `LocalSigner` (alloy-rs) is another
+- Unit tests for `parse_challenge` against a real 402 body
 
 **Acceptance criteria:**
-- [ ] `parse_challenge` correctly parses a real 402 body
-- [ ] `build_payment_header` produces a valid x402 `X-PAYMENT` header
-- [ ] `PaymentSigner` trait is well-defined
-- [ ] `KeeperHubProxySigner` at minimum constructs the right request shape
-- [ ] Unit tests for the typed-data hash
+- [ ] `parse_challenge` correctly parses a real 402 body shape
+- [ ] `PaymentChallenge` type models price, network, asset, recipient, nonce, validUntil
+- [ ] `WalletMcpSigner` constructs the right invocation shape (subprocess or JSON-RPC to MCP)
+- [ ] Unit tests for typed-data extraction
+- [ ] `cargo run -p keeperhub-rs --example parse_402` shows a parsed challenge
 
-**Done =** A 402 challenge from a real paid workflow can be parsed and converted into a signed payment header.
+**Done =** Can extract x402 challenge details and know which wallet tool to call. No private keys in our Rust binary. Self-custody path stays a future-only stub.
+
+**Out of scope (rejected from original plan):**
+- ❌ EIP-3009 typed-data signing in Rust (wallet handles it)
+- ❌ LocalSigner with alloy-rs (skeleton only, post-hackathon)
 
 ---
 
-### #6 — `keeperhub-rs`: `call_paid_workflow` with x402 auto-pay
+### #6 — `keeperhub-rs`: `call_paid_workflow` via wallet MCP
 
-**Track:** A · **Priority:** P0 · **Estimate:** L (6h) · **Depends on:** #3, #5
+**Track:** A · **Priority:** P0 · **Estimate:** S (1.5h) · **Depends on:** #3, #5
 
-**Why:** This is the "paying customer" mechanism. The whole pitch.
+**Why:** Same reasoning as #5 — the wallet's MCP `call_workflow` is the cleanest path. We don't reimplement 402 → sign → retry; we delegate the whole paid call to the wallet.
 
 **What to do:**
 - Add `McpClient::call_paid_workflow(slug, inputs, signer).await -> Result<JsonValue>`
-- On 402, parse the challenge, ask the signer for a payment, retry with the X-PAYMENT header
-- On 200, parse the workflow result
-- Surface all errors clearly
+- Default signer is `WalletMcpSigner` (the one from #5)
+- Surface all errors clearly (insufficient balance, workflow failure, etc.)
+- Free calls still go through the HTTP MCP path (#3); paid calls route to the wallet MCP
 
 **Acceptance criteria:**
-- [ ] Free workflow calls work (no payment attempted)
-- [ ] Paid workflow calls successfully auto-pay and return the result
+- [ ] Free workflow calls work (no payment attempted) — uses HTTP MCP
+- [ ] Paid workflow calls succeed via the wallet MCP auto-pay
 - [ ] Insufficient-balance error maps to `Error::X402Unpaid`
-- [ ] Retry on 402 is automatic and idempotent
-- [ ] Integration test on Sepolia testnet passes (small $0.01 call)
+- [ ] Wallet subprocess failure (no `~/.keeperhub/wallet.json`, etc.) is surfaced with a clear message
+- [ ] Integration test on Base mainnet with $0.01 paid workflow passes (requires USDC funding)
 
-**Done =** A real paid workflow can be called from Rust with auto-pay working.
+**Done =** A real paid workflow can be called from Rust with auto-pay working. No EIP-3009 code in our binary.
 
 ---
 
@@ -864,7 +867,7 @@ Save as `plans/daily/<date>.md` if you want a record.
 - Get the toolchain verified, get keeperhub-rs talking to the real MCP server. Critical foundation.
 
 **Week 2 (Jul 10-16): #5, #6, #13, #7, #8**
-- x402 builder + auto-pay in parallel with the two KeeperHub workflows. Two tracks in parallel.
+- x402 challenge parser + wallet-MCP delegation in parallel with Aave/Morpho direct calls. Two tracks in parallel. (#5/#6 now both S estimates, not M+L.)
 
 **Week 3 (Jul 17-23): #9, #10, #11, #12**
 - Agent loop comes alive. Yield + job + safe mode.
