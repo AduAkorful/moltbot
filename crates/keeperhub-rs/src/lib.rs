@@ -34,6 +34,7 @@
 pub mod aave;
 pub mod error;
 pub mod mcp;
+pub mod morpho;
 pub mod rest;
 pub mod types;
 pub mod x402;

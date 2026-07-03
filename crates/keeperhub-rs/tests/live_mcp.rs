@@ -327,3 +327,24 @@ async fn execute_protocol_action_get_aave_account_data_succeeds() {
         );
     }
 }
+
+#[tokio::test]
+async fn search_protocol_actions_finds_morpho_supply() {
+    let c = client();
+    let resp = c
+        .search_protocol_actions(Some("supply"), Some("morpho"))
+        .await
+        .expect("search_protocol_actions should succeed");
+
+    // Loose assertion: the response mentions "supply" and "morpho"
+    // somewhere. We don't pin the exact JSON shape.
+    let text = serde_json::to_string(&resp).unwrap_or_default();
+    assert!(
+        text.contains("supply"),
+        "expected 'supply' in search response, got: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("morpho"),
+        "expected 'morpho' in search response, got: {text}"
+    );
+}

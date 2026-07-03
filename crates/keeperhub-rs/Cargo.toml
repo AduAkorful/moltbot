@@ -47,3 +47,7 @@ path = "examples/search_workflows.rs"
 [[example]]
 name = "aave_supply"
 path = "examples/aave_supply.rs"
+
+[[example]]
+name = "morpho_position"
+path = "examples/morpho_position.rs"
