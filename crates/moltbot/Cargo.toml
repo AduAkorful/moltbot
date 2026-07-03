@@ -27,6 +27,7 @@ chrono.workspace = true
 sqlx.workspace = true
 axum.workspace = true
 tower.workspace = true
+reqwest.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util", "macros", "rt-multi-thread"] }

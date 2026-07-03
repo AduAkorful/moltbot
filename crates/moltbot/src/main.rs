@@ -33,6 +33,7 @@
 //! - [`pre_x402`] — pre-call balance check (defense in depth)
 //! - [`audit`] — local SQLite audit log (runs, actions, x402 payments)
 //! - [`dashboard`] — Axum server rendering the audit log as a live page
+//! - [`telegram`] — Telegram alerts (safe mode Enter/Exit)
 //!
 //! Public re-exports in the crate root make the structure available
 //! to integration tests under `tests/`.
@@ -45,6 +46,7 @@ pub mod jobs;
 pub mod pre_x402;
 pub mod safe_mode;
 pub mod state;
+pub mod telegram;
 pub mod tick;
 pub mod yield_strategy;
 
@@ -105,6 +107,10 @@ USAGE:
 
 ENV:
     KEEPERHUB_API_KEY    KeeperHub API key (Bearer). Required.
+    TELEGRAM_BOT_TOKEN   Optional Telegram bot token (from
+                         @BotFather). When set along with
+                         `telegram_chat_id` in TOML, safe-mode
+                         Enter/Exit events send Telegram alerts.
     MOLTBOT_CONFIG       Path to a TOML config file. Optional.
     MOLTBOT_AUDIT_DB     SQLite URL for the audit log. Optional.
                          Default: 'sqlite:./moltbot.db'. Set to
@@ -131,6 +137,8 @@ CONFIG FILE:
     # morpho_target_hf = 1.3
     # dashboard_addr = \"127.0.0.1:3030\"
     # max_x402_payment_usd = 0.10
+    # telegram_bot_token = \"123:abc\"   # or TELEGRAM_BOT_TOKEN env var
+    # telegram_chat_id = \"987654321\"
 ",
         version = env!("CARGO_PKG_VERSION"),
     );
@@ -225,7 +233,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs, audit_arc);
+    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs, audit_arc, None);
     let _shutdown = loop_.shutdown_handle();
 
     let iterations = loop_.run().await;

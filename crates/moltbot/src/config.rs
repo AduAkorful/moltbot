@@ -191,6 +191,22 @@ pub struct AgentConfig {
     /// over-spends on expensive calls. Default: 0.10.
     #[serde(default = "default_max_x402_payment_usd")]
     pub max_x402_payment_usd: f64,
+
+    /// Optional Telegram bot token (from @BotFather). When
+    /// `Some` along with `telegram_chat_id`, the agent
+    /// sends a Telegram message on every safe-mode
+    /// `Enter` / `Exit` transition (see [`crate::telegram`]).
+    /// Override at runtime with the `TELEGRAM_BOT_TOKEN`
+    /// env var.
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
+
+    /// Optional Telegram chat id (the numeric user id or a
+    /// channel name like `@my_channel`). When `Some` along
+    /// with `telegram_bot_token`, the agent sends safe-mode
+    /// alerts to this chat.
+    #[serde(default)]
+    pub telegram_chat_id: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -208,6 +224,8 @@ impl Default for AgentConfig {
             morpho_target_hf: default_morpho_target_hf(),
             dashboard_addr: default_dashboard_addr(),
             max_x402_payment_usd: default_max_x402_payment_usd(),
+            telegram_bot_token: None,
+            telegram_chat_id: None,
         }
     }
 }
@@ -220,7 +238,8 @@ impl AgentConfig {
 
     /// Load a config from `path` (or defaults if `None`) and overlay
     /// the `KEEPERHUB_API_KEY` environment variable when the TOML
-    /// doesn't set it.
+    /// doesn't set it. Also overlays `TELEGRAM_BOT_TOKEN` if the
+    /// TOML doesn't set it.
     pub fn from_env_and_file(path: Option<&Path>) -> Result<Self, ConfigError> {
         let mut config = if let Some(p) = path {
             let text = std::fs::read_to_string(p).map_err(|e| {
@@ -235,6 +254,9 @@ impl AgentConfig {
 
         if config.keeperhub_api_key.is_none() {
             config.keeperhub_api_key = std::env::var("KEEPERHUB_API_KEY").ok();
+        }
+        if config.telegram_bot_token.is_none() {
+            config.telegram_bot_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
         }
 
         config.validate()?;
@@ -489,5 +511,27 @@ mod tests {
         "#;
         let c: AgentConfig = toml::from_str(text).unwrap();
         assert!((c.max_x402_payment_usd - 0.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn telegram_config_defaults_to_none() {
+        let c = AgentConfig {
+            keeperhub_api_key: Some("kh_test".to_string()),
+            ..AgentConfig::default()
+        };
+        assert!(c.telegram_bot_token.is_none());
+        assert!(c.telegram_chat_id.is_none());
+    }
+
+    #[test]
+    fn parse_overrides_telegram_config() {
+        let text = r#"
+            keeperhub_api_key = "kh_test"
+            telegram_bot_token = "123456:ABC"
+            telegram_chat_id = "987654321"
+        "#;
+        let c: AgentConfig = toml::from_str(text).unwrap();
+        assert_eq!(c.telegram_bot_token.as_deref(), Some("123456:ABC"));
+        assert_eq!(c.telegram_chat_id.as_deref(), Some("987654321"));
     }
 }

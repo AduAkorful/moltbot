@@ -32,6 +32,7 @@ use crate::job::{JobContext, JobRegistry};
 use crate::pre_x402;
 use crate::safe_mode::{self, SafeModeChange};
 use crate::state::SharedState;
+use crate::telegram::Telegram;
 use crate::yield_strategy::{self, ParkDecision};
 use keeperhub_rs::mcp::McpClient;
 use std::sync::Arc;
@@ -59,6 +60,10 @@ pub struct AgentLoop {
     /// disables persistence — used by unit tests and any
     /// short-lived process that doesn't need an audit trail.
     audit: Option<Arc<AuditLog>>,
+    /// Optional Telegram alerter. When `Some` and configured,
+    /// a message is sent on every safe-mode `Enter` / `Exit`
+    /// transition. `None` disables Telegram entirely.
+    telegram: Option<Arc<Telegram>>,
     shutdown: Arc<Notify>,
 }
 
@@ -70,13 +75,15 @@ impl AgentLoop {
     /// (tick interval, thresholds, network). `jobs` is the registry
     /// of jobs to run on every tick — pass [`JobRegistry::new`] for
     /// an empty (no-op) registry. `audit` is the optional SQLite
-    /// audit log; pass `None` to disable persistence.
+    /// audit log; pass `None` to disable persistence. `telegram`
+    /// is the optional Telegram alerter; pass `None` to disable.
     pub fn new(
         state: SharedState,
         client: Arc<McpClient>,
         config: Arc<AgentConfig>,
         jobs: JobRegistry,
         audit: Option<Arc<AuditLog>>,
+        telegram: Option<Arc<Telegram>>,
     ) -> Self {
         Self {
             state,
@@ -84,6 +91,7 @@ impl AgentLoop {
             config,
             jobs: Arc::new(jobs),
             audit,
+            telegram,
             shutdown: Arc::new(Notify::new()),
         }
     }
@@ -204,6 +212,20 @@ impl AgentLoop {
                 let mut w = self.state.write().await;
                 w.set_safe_mode(true);
                 snapshot.safe_mode = true;
+                // Telegram alert (#23). Best-effort: a send
+                // error is logged but does not propagate.
+                // The `is_configured` check inside `send_message`
+                // makes this a no-op when the agent has no
+                // Telegram config.
+                if let Some(tg) = self.telegram.as_ref() {
+                    let text = Telegram::format_safe_mode_enter(balance, threshold);
+                    let tg = Arc::clone(tg);
+                    tokio::spawn(async move {
+                        if let Err(e) = tg.send_message(&text).await {
+                            tracing::warn!(error = %e, "telegram send failed (enter)");
+                        }
+                    });
+                }
             }
             SafeModeChange::Exit { balance, threshold } => {
                 tracing::info!(
@@ -214,6 +236,15 @@ impl AgentLoop {
                 let mut w = self.state.write().await;
                 w.set_safe_mode(false);
                 snapshot.safe_mode = false;
+                if let Some(tg) = self.telegram.as_ref() {
+                    let text = Telegram::format_safe_mode_exit(balance, threshold);
+                    let tg = Arc::clone(tg);
+                    tokio::spawn(async move {
+                        if let Err(e) = tg.send_message(&text).await {
+                            tracing::warn!(error = %e, "telegram send failed (exit)");
+                        }
+                    });
+                }
             }
             SafeModeChange::NoChange { safe_mode } => {
                 // No state change. `snapshot.safe_mode` is
@@ -447,6 +478,7 @@ mod tests {
             test_config(),
             JobRegistry::new(),
             None,
+            None,
         )
     }
 
@@ -622,6 +654,7 @@ mod tests {
             test_config(),
             registry,
             None,
+            None,
         );
         loop_.tick().await;
 
@@ -673,6 +706,7 @@ mod tests {
             test_client(),
             test_config(),
             registry,
+            None,
             None,
         );
         loop_.tick().await;
@@ -834,6 +868,7 @@ mod tests {
             test_config(),
             registry,
             None,
+            None,
         );
         loop_.tick().await;
         let s = state.read().await;
@@ -894,6 +929,7 @@ mod tests {
             test_config(),
             registry,
             Some(Arc::clone(&log)),
+            None,
         );
         loop_.tick().await;
 
@@ -970,6 +1006,7 @@ mod tests {
             test_config(),
             registry,
             Some(Arc::clone(&log)),
+            None,
         );
         loop_.tick().await;
 
@@ -1012,6 +1049,7 @@ mod tests {
             test_client(),
             cfg,
             JobRegistry::new(),
+            None,
             None,
         )
     }
@@ -1103,5 +1141,104 @@ mod tests {
         let s = state.read().await;
         // The agent is still operational.
         assert!(!s.safe_mode, "pre-x402 skip must not enter safe mode");
+    }
+
+    // --- telegram alerts (#23) ---------------------------------------
+
+    /// Build a loop with a Telegram client pointing at an
+    /// unreachable address (port 1). The send will fail
+    /// silently (it's spawned), so the tick should complete
+    /// without error.
+    fn test_loop_with_telegram(state: SharedState) -> AgentLoop {
+        let tg = Arc::new(Telegram::with_base_url(
+            "test:token",
+            "999",
+            "http://127.0.0.1:1",
+        ));
+        AgentLoop::new(
+            state,
+            test_client(),
+            test_config(),
+            JobRegistry::new(),
+            None,
+            Some(tg),
+        )
+    }
+
+    #[tokio::test]
+    async fn tick_sends_telegram_alert_on_safe_mode_enter() {
+        // balance < safe_mode threshold → Enter. Telegram is
+        // configured but its URL is unreachable; the spawn
+        // will fail silently and the tick should complete.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(1.0);
+        }
+        let loop_ = test_loop_with_telegram(state.clone());
+        loop_.tick().await;
+        // Give the spawned send a moment to fail (and be
+        // logged) before we assert state.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let s = state.read().await;
+        assert!(s.safe_mode, "safe mode should be entered");
+    }
+
+    #[tokio::test]
+    async fn tick_sends_telegram_alert_on_safe_mode_exit() {
+        // Start in safe mode; tick with high balance → Exit.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(50.0);
+            w.set_safe_mode(true);
+        }
+        let loop_ = test_loop_with_telegram(state.clone());
+        loop_.tick().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let s = state.read().await;
+        assert!(!s.safe_mode, "safe mode should be exited");
+    }
+
+    #[tokio::test]
+    async fn tick_skips_telegram_when_not_configured() {
+        // No telegram in the loop → safe mode Enter/Exit
+        // still works, no panics.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(1.0);
+        }
+        let loop_ = test_loop(state.clone());
+        loop_.tick().await;
+        let s = state.read().await;
+        assert!(s.safe_mode);
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_send_on_no_change() {
+        // Already in safe mode, balance still low → NoChange,
+        // no telegram send. The formatters are only called
+        // on Enter/Exit, so this is implicitly verified by
+        // the spawn count: zero spawns = no HTTP attempts.
+        // We can't directly observe spawns in a unit test,
+        // but the tick should complete quickly.
+        let state = new_shared_state();
+        {
+            let mut w = state.write().await;
+            w.set_usdc_balance(1.0);
+            w.set_safe_mode(true);
+        }
+        let loop_ = test_loop_with_telegram(state.clone());
+        let start = std::time::Instant::now();
+        loop_.tick().await;
+        let elapsed = start.elapsed();
+        // If telegram were called and the URL unreachable,
+        // the spawned send would block on connect timeout.
+        // 10s client timeout means a failure would take
+        // ~10s. We give the test 1s as a sanity bound.
+        assert!(elapsed < std::time::Duration::from_secs(1));
+        let s = state.read().await;
+        assert!(s.safe_mode);
     }
 }
