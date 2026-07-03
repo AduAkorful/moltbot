@@ -1,43 +1,167 @@
-//! MoltBot: the first paying customer of the KeeperHub marketplace.
+//! MoltBot — the first paying customer of the KeeperHub marketplace.
 //!
-//! MoltBot is a Rust autonomous agent that:
+//! A Rust autonomous agent that funds itself via x402 and uses
+//! KeeperHub's audit trail as its primary observability.
 //!
-//! 1. Holds a USDC balance on Base
-//! 2. Parks idle funds in Aave V3 via a KeeperHub yield workflow
-//! 3. Pays for keeper work in real time via x402 when it needs to read
-//!    onchain state, claim rewards, or move funds
-//! 4. Logs every action through KeeperHub's audit trail
+//! This binary is the agent's runtime. It loads a TOML config, opens
+//! an MCP client, and runs a periodic loop until interrupted. Yield
+//! strategy, Morpho job, safe mode, and the audit dashboard are
+//! layered on in subsequent iterations.
 //!
-//! # Status
+//! # Usage
 //!
-//! Pre-alpha. This is the binary entry point. The actual agent loop
-//! lands in Phase 5 of the project plan.
+//! ```sh
+//! # Set the KeeperHub API key (required).
+//! export KEEPERHUB_API_KEY=kh_...
+//!
+//! # Optional: point at a custom config file.
+//! export MOLTBOT_CONFIG=/path/to/moltbot.toml
+//!
+//! # Run.
+//! cargo run -p moltbot
+//! ```
+//!
+//! # Modules
+//!
+//! - [`config`] — agent configuration loaded from TOML + env
+//! - [`state`] — in-memory agent state (USDC balance, iteration, safe mode)
+//! - [`tick`] — the main tick loop with SIGINT shutdown
+//!
+//! Public re-exports in the crate root make the structure available
+//! to integration tests under `tests/`.
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+pub mod config;
+pub mod state;
+pub mod tick;
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use keeperhub_rs::mcp::{McpClient, DEFAULT_MCP_URL};
+use tracing_subscriber::EnvFilter;
+
+use crate::config::AgentConfig;
+use crate::state::new_shared_state;
+use crate::tick::AgentLoop;
+
+/// CLI argument shape. Kept tiny — the bulk of the config is TOML + env.
+#[derive(Debug, Default)]
+struct Cli {
+    /// Optional path to a TOML config file. Overrides the
+    /// `MOLTBOT_CONFIG` env var.
+    config: Option<PathBuf>,
+}
+
+fn parse_cli() -> Cli {
+    let mut cli = Cli::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--version" => {
+                println!("moltbot {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            "--config" => {
+                cli.config = args.next().map(PathBuf::from);
+            }
+            other => {
+                eprintln!("unknown argument: {other}");
+                print_help();
+                std::process::exit(2);
+            }
+        }
+    }
+    cli
+}
+
+fn print_help() {
+    println!(
+        "moltbot {version}
+
+USAGE:
+    moltbot [--config <path>]
+
+ENV:
+    KEEPERHUB_API_KEY    KeeperHub API key (Bearer). Required.
+    MOLTBOT_CONFIG       Path to a TOML config file. Optional.
+    RUST_LOG             Standard tracing-subscriber filter, e.g.
+                         'info', 'moltbot=debug'. Default: 'info'.
+
+OPTIONS:
+    --config <path>      Override the config file path.
+    -h, --help           Print this help message and exit.
+    --version            Print the version and exit.
+
+CONFIG FILE:
+    See `moltbot::config::AgentConfig` for the full schema. Example:
+
+        tick_interval_seconds = 60
+        network = \"1\"
+        park_threshold_usd = 50.0
+        withdraw_threshold_usd = 20.0
+        safe_mode_threshold_usd = 5.0
+",
+        version = env!("CARGO_PKG_VERSION"),
+    );
+}
+
+fn resolve_config_path(cli: &Cli) -> Option<PathBuf> {
+    cli.config
+        .clone()
+        .or_else(|| std::env::var("MOLTBOT_CONFIG").ok().map(PathBuf::from))
+}
+
+/// Set up tracing-subscriber from the `RUST_LOG` env var, defaulting
+/// to `info` if unset or unparseable.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,moltbot=info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .try_init();
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
+    let cli = parse_cli();
+    let config_path = resolve_config_path(&cli);
+    let config = AgentConfig::from_env_and_file(config_path.as_deref())
+        .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
+    let config = Arc::new(config);
+
     tracing::info!(
-        name = "MoltBot",
         version = env!("CARGO_PKG_VERSION"),
-        "starting up"
+        tick_seconds = config.tick_interval_seconds,
+        network = %config.network,
+        "moltbot starting"
     );
-    tracing::info!(
-        "Pre-alpha scaffold. Real agent loop lands in Phase 5 of plans/moltbot-deep-research.md."
-    );
-    tracing::info!("See plans/setup-verified.md for the local environment checklist.");
 
+    // Construct the MCP client. `api_key` is `Some` after validation.
+    let api_key = config
+        .keeperhub_api_key
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("KEEPERHUB_API_KEY missing after validation"))?;
+    let client = Arc::new(McpClient::new(DEFAULT_MCP_URL, api_key));
+
+    // Eagerly initialize the session so a bad API key fails fast.
+    if let Err(e) = client.initialize().await {
+        tracing::error!(error = %e, "MCP initialize failed; check KEEPERHUB_API_KEY");
+        return Err(anyhow::anyhow!("MCP initialize failed: {e}"));
+    }
+    tracing::info!(url = %client.url(), "MCP session established");
+
+    let state = new_shared_state();
+    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config));
+    let _shutdown = loop_.shutdown_handle();
+
+    let iterations = loop_.run().await;
+    tracing::info!(iterations, "moltbot exited cleanly");
     Ok(())
-}
-
-fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("info,moltbot=debug")),
-        )
-        .with(tracing_subscriber::fmt::layer().with_target(false))
-        .init();
 }

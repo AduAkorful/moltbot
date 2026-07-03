@@ -17,8 +17,13 @@ path = "src/main.rs"
 keeperhub-rs = { path = "../keeperhub-rs" }
 tokio.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util", "macros", "rt-multi-thread"] }
