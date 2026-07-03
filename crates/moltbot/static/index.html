@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MoltBot — Live Audit</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>MoltBot <span class="dim">— live audit</span></h1>
+    <p class="tagline">
+      First paying customer of the KeeperHub marketplace.
+      Polls <code>/api/runs</code> every 10s.
+    </p>
+  </header>
+
+  <section id="stats">
+    <div class="card">
+      <div class="label">runs</div>
+      <div class="value" id="stat-runs">—</div>
+    </div>
+    <div class="card">
+      <div class="label">actions</div>
+      <div class="value" id="stat-actions">—</div>
+    </div>
+    <div class="card">
+      <div class="label">x402 payments</div>
+      <div class="value" id="stat-payments">—</div>
+    </div>
+    <div class="card">
+      <div class="label">last update</div>
+      <div class="value small" id="stat-updated">—</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>action kinds</h2>
+    <table id="kind-table">
+      <thead><tr><th>kind</th><th>count</th></tr></thead>
+      <tbody id="kind-tbody">
+        <tr><td colspan="2" class="dim">loading…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>recent runs</h2>
+    <table id="runs-table">
+      <thead>
+        <tr>
+          <th>id</th>
+          <th>started</th>
+          <th>iter</th>
+          <th>status</th>
+          <th>actions</th>
+          <th>tx hashes</th>
+        </tr>
+      </thead>
+      <tbody id="runs-tbody">
+        <tr><td colspan="6" class="dim">loading…</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <footer>
+    <p class="dim">MoltBot v0.1.0 — built for the KeeperHub agents-onchain hackathon.</p>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

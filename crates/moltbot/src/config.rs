@@ -96,6 +96,13 @@ fn default_morpho_target_hf() -> f64 {
     1.3
 }
 
+/// Default dashboard listen address. `127.0.0.1:3030` per the
+/// plan; override with `dashboard_addr` in `moltbot.toml` for
+/// a different host/port.
+fn default_dashboard_addr() -> String {
+    "127.0.0.1:3030".to_string()
+}
+
 /// The agent's runtime configuration.
 ///
 /// Built by [`AgentConfig::from_env_and_file`]. All fields except
@@ -158,6 +165,13 @@ pub struct AgentConfig {
     /// `morpho/supply-collateral` to top it up. Default: 1.3.
     #[serde(default = "default_morpho_target_hf")]
     pub morpho_target_hf: f64,
+
+    /// Listen address for the audit-log dashboard. Default:
+    /// `127.0.0.1:3030`. Set to e.g. `0.0.0.0:3030` to expose
+    /// it on all interfaces (only do this on a trusted
+    /// network).
+    #[serde(default = "default_dashboard_addr")]
+    pub dashboard_addr: String,
 }
 
 impl Default for AgentConfig {
@@ -173,6 +187,7 @@ impl Default for AgentConfig {
             usdc_address: default_usdc_address(),
             morpho_market_id: None,
             morpho_target_hf: default_morpho_target_hf(),
+            dashboard_addr: default_dashboard_addr(),
         }
     }
 }

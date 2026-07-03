@@ -31,12 +31,14 @@
 //! - [`jobs`] — built-in [`job::Job`] implementations
 //! - [`safe_mode`] — low-balance detection; skips paid actions
 //! - [`audit`] — local SQLite audit log (runs, actions, x402 payments)
+//! - [`dashboard`] — Axum server rendering the audit log as a live page
 //!
 //! Public re-exports in the crate root make the structure available
 //! to integration tests under `tests/`.
 
 pub mod audit;
 pub mod config;
+pub mod dashboard;
 pub mod job;
 pub mod jobs;
 pub mod safe_mode;
@@ -52,6 +54,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::audit::AuditLog;
 use crate::config::AgentConfig;
+use crate::dashboard::DashboardState;
 use crate::job::JobRegistry;
 use crate::jobs::morpho_health::MorphoHealthJob;
 use crate::state::new_shared_state;
@@ -124,6 +127,7 @@ CONFIG FILE:
     # usdc_address   = \"0x...\"  # defaults to USDC on Ethereum mainnet
     # morpho_market_id = \"0x...\"  # enables the Morpho health-factor job
     # morpho_target_hf = 1.3
+    # dashboard_addr = \"127.0.0.1:3030\"
 ",
         version = env!("CARGO_PKG_VERSION"),
     );
@@ -194,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
     // env var (e.g. `sqlite::memory:` for ephemeral runs).
     let audit_url = std::env::var("MOLTBOT_AUDIT_DB")
         .unwrap_or_else(|_| "sqlite:./moltbot.db".to_string());
-    let audit = match AuditLog::connect(&audit_url).await {
+    let audit_arc = match AuditLog::connect(&audit_url).await {
         Ok(log) => {
             tracing::info!(url = %audit_url, "audit log opened");
             Some(std::sync::Arc::new(log))
@@ -205,7 +209,20 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs, audit);
+    // Spawn the dashboard server in the background. It shares
+    // the audit log via Arc, so reads on the dashboard are
+    // consistent with writes from the loop on every tick.
+    if let Some(ref audit) = audit_arc {
+        let state = DashboardState::new(Arc::clone(audit));
+        let addr = config.dashboard_addr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::dashboard::serve(state, &addr).await {
+                tracing::error!(error = %e, addr = %addr, "dashboard server exited with error");
+            }
+        });
+    }
+
+    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs, audit_arc);
     let _shutdown = loop_.shutdown_handle();
 
     let iterations = loop_.run().await;

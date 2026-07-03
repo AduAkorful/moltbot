@@ -39,6 +39,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # Database (audit log)
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 
+# Web framework (dashboard)
+axum = "0.7"
+tower = "0.5"
+
 # IDs
 uuid = { version = "1.10", features = ["v4", "serde"] }
 

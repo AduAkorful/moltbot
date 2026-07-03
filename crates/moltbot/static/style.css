@@ -1,0 +1,91 @@
+/* MoltBot dashboard — hand-rolled CSS, no Tailwind. */
+
+:root {
+  --bg: #0d1117;
+  --bg-elev: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #7d8590;
+  --accent: #58a6ff;
+  --accent-ok: #3fb950;
+  --accent-err: #f85149;
+  --accent-warn: #d29922;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+               sans-serif;
+  line-height: 1.5;
+}
+
+header {
+  padding: 2rem 2rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+h1 { margin: 0 0 0.25rem 0; font-size: 1.75rem; }
+h2 { margin: 2rem 0 0.75rem; font-size: 1.1rem; color: var(--text-dim); }
+
+.dim { color: var(--text-dim); font-weight: normal; }
+.tagline { color: var(--text-dim); margin: 0; }
+code {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  background: var(--bg-elev);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+}
+
+section { padding: 1.5rem 2rem; }
+
+#stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  padding: 1.5rem 2rem 0;
+}
+
+.card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 1rem;
+}
+.card .label { color: var(--text-dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.card .value { font-size: 1.75rem; margin-top: 0.25rem; font-weight: 600; }
+.card .value.small { font-size: 0.9rem; font-weight: normal; font-family: var(--mono); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+th, td {
+  text-align: left;
+  padding: 0.6rem 0.9rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+th { background: #1c2128; color: var(--text-dim); font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+tr:hover { background: #1c2128; }
+
+td.mono, .mono { font-family: var(--mono); font-size: 0.85em; }
+td .pill { display: inline-block; padding: 0.1em 0.5em; border-radius: 999px; font-size: 0.8em; }
+td .pill.ok { background: rgba(63, 185, 80, 0.15); color: var(--accent-ok); }
+td .pill.err { background: rgba(248, 81, 73, 0.15); color: var(--accent-err); }
+td .pill.run { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+footer { padding: 2rem; text-align: center; border-top: 1px solid var(--border); margin-top: 2rem; }

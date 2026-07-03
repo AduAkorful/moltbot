@@ -327,6 +327,166 @@ impl AuditLog {
             .await?;
         Ok(row.get::<i64, _>("c"))
     }
+
+    /// List the most recent runs, newest first. The `limit`
+    /// argument is clamped to `[1, 1000]` by the caller
+    /// (the dashboard uses 20).
+    pub async fn list_runs(&self, limit: i64) -> Result<Vec<RunRow>, AuditError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, started_at, ended_at, iteration, status, kind
+            FROM runs
+            ORDER BY id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| RunRow {
+                id: r.get("id"),
+                started_at: r.get("started_at"),
+                ended_at: r.get("ended_at"),
+                iteration: r.get("iteration"),
+                status: r.get("status"),
+                kind: r.get("kind"),
+            })
+            .collect())
+    }
+
+    /// List the actions for a single run, oldest first. Returns
+    /// an empty `Vec` if the run has no actions (or doesn't
+    /// exist; the caller is expected to verify the run exists
+    /// via [`AuditLog::get_run`]).
+    pub async fn list_actions_for_run(
+        &self,
+        run_id: i64,
+    ) -> Result<Vec<ActionRow>, AuditError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, run_id, kind, tx_hash, note, recorded_at
+            FROM actions
+            WHERE run_id = ?
+            ORDER BY id ASC
+            "#,
+        )
+        .bind(run_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ActionRow {
+                id: r.get("id"),
+                run_id: r.get("run_id"),
+                kind: r.get("kind"),
+                tx_hash: r.get("tx_hash"),
+                note: r.get("note"),
+                recorded_at: r.get("recorded_at"),
+            })
+            .collect())
+    }
+
+    /// Fetch a single run with its actions, or `None` if the
+    /// run does not exist.
+    pub async fn get_run(&self, run_id: i64) -> Result<Option<RunWithActions>, AuditError> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, started_at, ended_at, iteration, status, kind
+            FROM runs
+            WHERE id = ?
+            "#,
+        )
+        .bind(run_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let run = RunRow {
+            id: row.get("id"),
+            started_at: row.get("started_at"),
+            ended_at: row.get("ended_at"),
+            iteration: row.get("iteration"),
+            status: row.get("status"),
+            kind: row.get("kind"),
+        };
+        let actions = self.list_actions_for_run(run_id).await?;
+        Ok(Some(RunWithActions { run, actions }))
+    }
+
+    /// Compute aggregate stats. Returns the totals + a map of
+    /// action-kind → count, used by the dashboard's stat cards
+    /// and kind table.
+    pub async fn stats(&self) -> Result<Stats, AuditError> {
+        let total_runs = self.count_runs().await?;
+        let total_actions = self.count_actions().await?;
+        let total_x402_payments = self.count_x402_payments().await?;
+
+        let rows = sqlx::query(
+            "SELECT kind, COUNT(*) AS c FROM actions GROUP BY kind ORDER BY c DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut actions_by_kind = std::collections::BTreeMap::new();
+        for r in rows {
+            let kind: String = r.get("kind");
+            let count: i64 = r.get("c");
+            actions_by_kind.insert(kind, count);
+        }
+
+        Ok(Stats {
+            total_runs,
+            total_actions,
+            total_x402_payments,
+            actions_by_kind,
+        })
+    }
+}
+
+/// A row from the `runs` table.
+#[derive(Debug, Clone)]
+pub struct RunRow {
+    pub id: i64,
+    pub started_at: String,
+    pub ended_at: Option<String>,
+    pub iteration: i64,
+    pub status: String,
+    pub kind: String,
+}
+
+/// A row from the `actions` table.
+#[derive(Debug, Clone)]
+pub struct ActionRow {
+    pub id: i64,
+    pub run_id: i64,
+    pub kind: String,
+    pub tx_hash: Option<String>,
+    pub note: Option<String>,
+    pub recorded_at: String,
+}
+
+/// A run plus its actions. Returned by [`AuditLog::get_run`].
+#[derive(Debug, Clone)]
+pub struct RunWithActions {
+    pub run: RunRow,
+    pub actions: Vec<ActionRow>,
+}
+
+/// Aggregate stats for the dashboard.
+#[derive(Debug, Clone)]
+pub struct Stats {
+    pub total_runs: i64,
+    pub total_actions: i64,
+    pub total_x402_payments: i64,
+    /// Action kind → count, sorted by count descending when
+    /// serialized as JSON (the dashboard renders in this order).
+    pub actions_by_kind: std::collections::BTreeMap<String, i64>,
 }
 
 /// A handle to an in-flight tick transaction.
