@@ -556,3 +556,48 @@ pub struct CallWorkflowResult {
     #[serde(default)]
     pub feedback: Option<serde_json::Value>,
 }
+
+/// Optional filters for [`crate::mcp::McpClient::search_workflows`].
+///
+/// All fields are `None` by default. Build with struct-update syntax so
+/// un-set fields are omitted from the MCP request payload (the server
+/// only filters on a field if it's present in the args object).
+///
+/// ```no_run
+/// use keeperhub_rs::types::SearchWorkflowsOptions;
+/// let opts = SearchWorkflowsOptions {
+///     query: Some("morpho health".into()),
+///     category: Some("defi".into()),
+///     ..Default::default()
+/// };
+/// # let _ = opts;
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchWorkflowsOptions {
+    /// Natural-language search query. Matches against `name` and
+    /// `description` (server-side behavior; this client just forwards
+    /// the string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+
+    /// Category filter (e.g. `"defi"`, `"monitoring"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+
+    /// Chain ID filter (e.g. `"1"` for Ethereum, `"8453"` for Base).
+    /// Always a string per the API — the same shape used by the
+    /// `web3/*` actions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+
+    /// Workflow type filter: `"read"` (executes and returns the result)
+    /// or `"write"` (returns unsigned calldata for the caller to submit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_type: Option<String>,
+
+    /// Sort order. `"popular"` ranks by call count, `"recent"` by
+    /// listing date. Omit for the server's default catalog ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+}

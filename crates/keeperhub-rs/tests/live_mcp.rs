@@ -173,3 +173,96 @@ async fn get_execution_for_unknown_id_fails() {
         "expected Error::Api or Error::Mcp, got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn search_workflows_default_returns_catalog() {
+    use keeperhub_rs::types::SearchWorkflowsOptions;
+
+    let c = client();
+    let items = c
+        .search_workflows(SearchWorkflowsOptions::default())
+        .await
+        .expect("default search_workflows should succeed");
+
+    // The marketplace has at least one item in it (the public catalog
+    // we observed in setup had 20). We don't assert on a specific count
+    // — the catalog grows over time. We do assert that every returned
+    // item is well-formed and listed.
+    for w in &items {
+        assert!(!w.id.is_empty(), "workflow id should be non-empty");
+        assert!(!w.name.is_empty(), "workflow name should be non-empty");
+        assert!(w.is_listed, "search results should only contain listed workflows");
+    }
+}
+
+#[tokio::test]
+async fn search_workflows_with_category_filters_results() {
+    use keeperhub_rs::types::SearchWorkflowsOptions;
+
+    let c = client();
+    let items = c
+        .search_workflows(SearchWorkflowsOptions {
+            category: Some("defi".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("category search should succeed");
+
+    // Every result must have category="defi" (otherwise the filter is broken).
+    for w in &items {
+        assert_eq!(
+            w.category.as_deref(),
+            Some("defi"),
+            "category filter returned non-defi workflow: {:?} ({})",
+            w.name,
+            w.id,
+        );
+    }
+}
+
+#[tokio::test]
+async fn search_workflows_with_chain_filters_results() {
+    use keeperhub_rs::types::SearchWorkflowsOptions;
+
+    let c = client();
+    let items = c
+        .search_workflows(SearchWorkflowsOptions {
+            chain: Some("1".into()), // Ethereum mainnet
+            ..Default::default()
+        })
+        .await
+        .expect("chain search should succeed");
+
+    // Workflows that don't pin a chain (chain=None) are multi-chain
+    // and may also appear in the result. The filter is "chain includes
+    // this id" — we just require that any pinned chain matches.
+    for w in &items {
+        if let Some(ch) = &w.chain {
+            assert_eq!(
+                ch, "1",
+                "chain filter returned workflow on chain {ch}: {:?} ({})",
+                w.name, w.id,
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn search_workflows_with_unknown_category_returns_empty_or_subset() {
+    use keeperhub_rs::types::SearchWorkflowsOptions;
+
+    let c = client();
+    let items = c
+        .search_workflows(SearchWorkflowsOptions {
+            category: Some("this-category-does-not-exist-xyz".into()),
+            ..Default::default()
+        })
+        .await
+        .expect("unknown category search should succeed");
+
+    // The server either returns no items, or a subset. We just require
+    // it doesn't error.
+    for w in &items {
+        assert!(w.is_listed);
+    }
+}

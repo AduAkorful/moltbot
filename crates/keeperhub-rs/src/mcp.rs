@@ -41,7 +41,7 @@
 //! and the session is reused until it expires or the server returns 401.
 
 use crate::error::{Error, Result};
-use crate::types::{CallWorkflowResult, ExecutionDetail, Workflow};
+use crate::types::{CallWorkflowResult, ExecutionDetail, SearchWorkflowsOptions, Workflow};
 use crate::x402::parse_challenge;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -147,6 +147,33 @@ impl McpClient {
                 "list_workflows: failed to parse response as Vec<Workflow>: {e}; body: {text}"
             ))
         })
+    }
+
+    /// Search the KeeperHub marketplace for listed workflows.
+    ///
+    /// Maps to the `search_workflows` MCP tool. Use this to discover
+    /// workflows at runtime (by free-text query, category, chain, or
+    /// type) and then call them with [`McpClient::call_workflow`].
+    ///
+    /// All filters in `opts` are optional. With
+    /// [`SearchWorkflowsOptions::default()`] the full marketplace
+    /// catalog is returned in the server's default ordering.
+    ///
+    /// Each returned [`Workflow`] is the slim listing shape (no
+    /// `nodes`/`edges` — those come from `get_workflow`).
+    ///
+    /// Note: the `search_workflows` MCP tool does not expose a `tag`
+    /// filter; the available filters are `query`, `category`, `chain`,
+    /// `workflowType`, and `sort`. This struct models the real API.
+    pub async fn search_workflows(
+        &self,
+        opts: SearchWorkflowsOptions,
+    ) -> Result<Vec<Workflow>> {
+        let args = serde_json::to_value(&opts).map_err(|e| {
+            Error::Internal(format!("search_workflows: failed to serialize options: {e}"))
+        })?;
+        let text = self.tools_call_text("search_workflows", args).await?;
+        unwrap_search_envelope(&text)
     }
 
     /// Call a marketplace workflow by slug.
@@ -542,6 +569,36 @@ fn flatten_logs_envelope(text: &str) -> Result<crate::types::ExecutionDetail> {
     })
 }
 
+/// Unwrap the `search_workflows` response from `{ items: [Workflow, ...] }`
+/// into `Vec<Workflow>`.
+///
+/// The MCP server wraps the items array in an envelope object. The
+/// envelope may also include pagination fields (e.g. `nextCursor`) in
+/// future versions — we ignore anything except `items`.
+fn unwrap_search_envelope(text: &str) -> Result<Vec<Workflow>> {
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let v: Value = serde_json::from_str(text).map_err(|e| {
+        Error::Internal(format!(
+            "search_workflows: response is not valid JSON: {e}; body: {text}"
+        ))
+    })?;
+    let items = v
+        .get("items")
+        .and_then(|i| i.as_array())
+        .ok_or_else(|| {
+            Error::Internal(format!(
+                "search_workflows: response missing 'items' array; body: {text}"
+            ))
+        })?;
+    serde_json::from_value(Value::Array(items.clone())).map_err(|e| {
+        Error::Internal(format!(
+            "search_workflows: failed to parse items as Vec<Workflow>: {e}; body: {text}"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,5 +694,118 @@ mod tests {
         // but we should at least handle the parse and surface a clear error.
         let err = flatten_logs_envelope(body).unwrap_err();
         assert!(matches!(err, Error::Internal(_)));
+    }
+
+    #[test]
+    fn unwrap_search_envelope_returns_empty_for_empty_string() {
+        let items = unwrap_search_envelope("").unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn unwrap_search_envelope_returns_empty_vec_for_empty_items() {
+        let body = r#"{ "items": [] }"#;
+        let items = unwrap_search_envelope(body).unwrap();
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn unwrap_search_envelope_parses_slim_workflow() {
+        let body = r#"{
+            "items": [{
+                "id": "abc123",
+                "name": "Aave Health Check",
+                "description": "Returns the user's Aave V3 health factor.",
+                "listedSlug": "aave-health-check",
+                "listedAt": "2026-07-01T12:00:00.000Z",
+                "inputSchema": {"type": "object", "properties": {"wallet": {"type": "string"}}},
+                "outputMapping": {"result": "{{@node:Result.result}}"},
+                "priceUsdcPerCall": "0.05",
+                "organizationId": "org-1",
+                "createdAt": "2026-07-01T11:00:00.000Z",
+                "updatedAt": "2026-07-01T12:00:00.000Z",
+                "isListed": true,
+                "workflowType": "read",
+                "category": "defi",
+                "chain": "1"
+            }]
+        }"#;
+        let items = unwrap_search_envelope(body).unwrap();
+        assert_eq!(items.len(), 1);
+        let w = &items[0];
+        assert_eq!(w.id, "abc123");
+        assert_eq!(w.name, "Aave Health Check");
+        assert_eq!(w.listed_slug.as_deref(), Some("aave-health-check"));
+        assert_eq!(w.price_usdc_per_call.as_deref(), Some("0.05"));
+        assert_eq!(w.category.as_deref(), Some("defi"));
+        assert_eq!(w.chain.as_deref(), Some("1"));
+        assert!(w.is_listed);
+        // Slim shape: nodes/edges are None
+        assert!(w.nodes.is_none());
+        assert!(w.edges.is_none());
+        assert!(w.input_schema.is_some());
+    }
+
+    #[test]
+    fn unwrap_search_envelope_errors_on_missing_items() {
+        let body = r#"{ "nextCursor": "xyz" }"#;
+        let err = unwrap_search_envelope(body).unwrap_err();
+        match err {
+            Error::Internal(msg) => {
+                assert!(msg.contains("missing 'items'"), "unexpected error: {msg}");
+            }
+            other => panic!("expected Error::Internal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unwrap_search_envelope_errors_on_invalid_json() {
+        let body = "this is not json";
+        let err = unwrap_search_envelope(body).unwrap_err();
+        assert!(matches!(err, Error::Internal(_)));
+    }
+
+    #[test]
+    fn search_workflows_options_default_serializes_to_empty_object() {
+        let opts = SearchWorkflowsOptions::default();
+        let json = serde_json::to_value(&opts).unwrap();
+        // Every field is None, so the serialized form is `{}`.
+        assert_eq!(json, json!({}));
+    }
+
+    #[test]
+    fn search_workflows_options_skips_none_fields() {
+        let opts = SearchWorkflowsOptions {
+            query: Some("morpho".into()),
+            category: Some("defi".into()),
+            chain: None,
+            workflow_type: Some("read".into()),
+            sort: None,
+        };
+        let json = serde_json::to_value(&opts).unwrap();
+        // Only set fields are present; None fields are omitted.
+        assert_eq!(
+            json,
+            json!({
+                "query": "morpho",
+                "category": "defi",
+                "workflowType": "read",
+            })
+        );
+    }
+
+    #[test]
+    fn search_workflows_options_round_trips_via_camelcase() {
+        let opts = SearchWorkflowsOptions {
+            workflow_type: Some("write".into()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        // Verify the wire format uses camelCase.
+        assert!(json.contains("workflowType"), "expected camelCase in {json}");
+        // And round-trips back to the same struct.
+        let back: SearchWorkflowsOptions = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.workflow_type.as_deref(), Some("write"));
+        assert!(back.query.is_none());
     }
 }

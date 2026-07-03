@@ -39,3 +39,7 @@ path = "examples/list_workflows.rs"
 [[example]]
 name = "call_workflow"
 path = "examples/call_workflow.rs"
+
+[[example]]
+name = "search_workflows"
+path = "examples/search_workflows.rs"

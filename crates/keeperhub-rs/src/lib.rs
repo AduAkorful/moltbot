@@ -46,6 +46,6 @@ pub mod prelude {
     pub use crate::mcp::McpClient;
     pub use crate::types::{
         CallWorkflowResult, Execution, ExecutionDetail, ExecutionStatus, ExecutionStatusSummary,
-        ExecutionTxHash, Workflow,
+        ExecutionTxHash, SearchWorkflowsOptions, Workflow,
     };
 }
