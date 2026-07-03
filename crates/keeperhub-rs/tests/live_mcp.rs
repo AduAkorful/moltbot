@@ -348,3 +348,114 @@ async fn search_protocol_actions_finds_morpho_supply() {
         "expected 'morpho' in search response, got: {text}"
     );
 }
+
+#[tokio::test]
+async fn workflow_crud_create_list_unlist_roundtrip() {
+    use keeperhub_rs::types::{
+        CreateWorkflowOptions, Edge, ListWorkflowOptions, Node, NodeData, NodePosition,
+    };
+    use keeperhub_rs::workflows::{
+        aave_v3_risk_check_input_schema, aave_v3_risk_check_output_mapping,
+    };
+    use serde_json::json;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let c = client();
+
+    // Build a unique slug per run so the test is idempotent (re-running
+    // it doesn't fail on slug conflicts). The slug pattern has to be
+    // a valid marketplace slug; we use a millisecond timestamp suffix.
+    let stamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let test_slug = format!("kh-rs-test-{stamp_ms}");
+
+    // Minimal workflow: manual trigger only (no actions). This keeps
+    // the test cheap and avoids any plugin-credential gotchas.
+    let trigger = Node {
+        id: "trigger-1".to_string(),
+        node_type: Some("trigger".to_string()),
+        position: Some(NodePosition { x: 0.0, y: 0.0 }),
+        data: NodeData {
+            data_type: Some("trigger".to_string()),
+            label: Some("Manual Trigger".to_string()),
+            config: json!({ "triggerType": "Manual" }),
+            status: None,
+            description: None,
+        },
+    };
+
+    let created = c
+        .create_workflow(
+            &format!("keeperhub-rs live test {stamp_ms}"),
+            vec![trigger],
+            vec![Edge {
+                id: "e1".to_string(),
+                source: "trigger-1".to_string(),
+                target: "trigger-1".to_string(), // self-edge is a no-op but keeps the edge non-empty
+                source_handle: None,
+            }],
+            CreateWorkflowOptions {
+                description: Some(
+                    "ephemeral test workflow created by the keeperhub-rs test suite".to_string(),
+                ),
+                enabled: Some(false),
+                project_id: None,
+                tag_id: None,
+            },
+        )
+        .await
+        .expect("create_workflow should succeed");
+
+    assert!(!created.id.is_empty(), "created workflow must have an id");
+    let workflow_id = created.id.clone();
+
+    // get_workflow should return it
+    let fetched = c
+        .get_workflow(&workflow_id)
+        .await
+        .expect("get_workflow should succeed");
+    assert_eq!(fetched.id, workflow_id);
+
+    // List it
+    let listed = c
+        .list_workflow(
+            &workflow_id,
+            ListWorkflowOptions {
+                slug: Some(test_slug.clone()),
+                category: Some("defi".to_string()),
+                chain: Some("1".to_string()),
+                input_schema: Some(aave_v3_risk_check_input_schema()),
+                output_mapping: Some(aave_v3_risk_check_output_mapping()),
+                workflow_type: Some("read".to_string()),
+            },
+        )
+        .await
+        .expect("list_workflow should succeed");
+    assert!(listed.is_listed, "workflow should be listed after list_workflow");
+
+    // The slug should be set
+    let slug = listed
+        .listed_slug
+        .clone()
+        .expect("listed workflow should have a listed_slug");
+    assert_eq!(slug, test_slug, "listed slug should match what we sent");
+
+    // Read it back via the public get_workflow_listing (no auth)
+    let public_listing = c
+        .get_workflow_listing(&slug)
+        .await
+        .expect("get_workflow_listing should succeed");
+    assert_eq!(public_listing.listed_slug.as_deref(), Some(slug.as_str()));
+
+    // Unlist to clean up
+    let _unlisted = c
+        .unlist_workflow(&workflow_id)
+        .await
+        .expect("unlist_workflow should succeed");
+    // We don't assert on is_listed here — the server may keep the
+    // slug but toggle is_listed=false; either way the cleanup ran.
+
+    tracing::info!(workflow_id = %workflow_id, slug = %slug, "roundtrip OK");
+}

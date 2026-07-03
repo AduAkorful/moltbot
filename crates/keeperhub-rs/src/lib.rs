@@ -37,6 +37,7 @@ pub mod mcp;
 pub mod morpho;
 pub mod rest;
 pub mod types;
+pub mod workflows;
 pub mod x402;
 
 pub use error::{Error, Result};

@@ -51,3 +51,7 @@ path = "examples/aave_supply.rs"
 [[example]]
 name = "morpho_position"
 path = "examples/morpho_position.rs"
+
+[[example]]
+name = "publish_aave_risk_check"
+path = "examples/publish_aave_risk_check.rs"

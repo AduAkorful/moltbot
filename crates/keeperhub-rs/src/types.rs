@@ -601,3 +601,152 @@ pub struct SearchWorkflowsOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<String>,
 }
+
+/// Optional metadata for [`crate::mcp::McpClient::create_workflow`].
+///
+/// All fields are `None` by default. Use struct-update syntax to set
+/// only the ones you care about.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateWorkflowOptions {
+    /// Workflow description. Optional per the MCP schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Whether to enable the workflow at creation time. Defaults to
+    /// `false` on the server. Manual triggers can be executed
+    /// regardless of `enabled`; the flag matters for scheduled /
+    /// event / block / webhook triggers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Project ID to assign the workflow to. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+
+    /// Tag ID to label the workflow. Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_id: Option<String>,
+}
+
+/// Optional metadata to attach when publishing a workflow to the
+/// marketplace via [`crate::mcp::McpClient::list_workflow`].
+///
+/// On first publish, `slug` is required and the server refuses to let
+/// you change it later. On re-publish, the slug is preserved. The
+/// `workflow_type` must be `"read"` for read-only workflows (most of
+/// the marketplace) or `"write"` for state-changing ones.
+///
+/// `input_schema` and `output_mapping` are the public-facing JSON
+/// Schemas that marketplace callers see in their MCP tool descriptors;
+/// populate them carefully because they shape how agents invoke the
+/// workflow.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListWorkflowOptions {
+    /// Public URL slug (e.g. `"aave-v3-risk-check"`). Required on
+    /// first publish; preserved on re-publish. Permanent once set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+
+    /// Workflow category (e.g. `"defi"`, `"monitoring"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+
+    /// Chain ID this workflow targets (e.g. `"1"` for Ethereum,
+    /// `"8453"` for Base). Omit for multi-chain workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+
+    /// JSON Schema describing the workflow's input parameters.
+    /// Required for listed workflows so marketplace callers know the
+    /// shape to pass.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+
+    /// Mapping from public output field names to the workflow's
+    /// internal node outputs. Required for listed workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mapping: Option<serde_json::Value>,
+
+    /// Workflow type: `"read"` (executes and returns the result) or
+    /// `"write"` (returns unsigned calldata for the caller to submit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_type: Option<String>,
+}
+
+/// Fields for [`crate::mcp::McpClient::update_workflow`].
+///
+/// All fields are optional — only those that are `Some` are sent in
+/// the request payload. `enabled = false` is the typical way to stop
+/// a scheduled workflow from firing without deleting it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowUpdate {
+    /// New workflow name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// New workflow description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Replace the entire node graph. None means "leave nodes
+    /// unchanged". To set just one field, you must resend the full
+    /// graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Vec<Node>>,
+
+    /// Replace the entire edge set. None means "leave edges unchanged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edges: Option<Vec<Edge>>,
+
+    /// Set enabled state. None means "leave enabled state unchanged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+
+    /// Project ID to assign. `Some("")` is treated as null by the
+    /// server (use the `null` JSON literal to unassign). Wrap with
+    /// care.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+
+    /// Tag ID to assign.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag_id: Option<String>,
+}
+
+/// Fields for [`crate::mcp::McpClient::update_workflow_listing`].
+///
+/// All fields are optional. The server's quirk: **`priceUsdcPerCall`
+/// is only honored while the workflow is unlisted**. To change the
+/// price of a listed workflow, call `unlist_workflow` first, then
+/// `update_workflow_listing` with the new price, then `list_workflow`
+/// again. The same dance is required for the UI's "Marketplace" button.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListingUpdate {
+    /// Updated category.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+
+    /// Updated chain ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain: Option<String>,
+
+    /// Updated input JSON Schema (full replace, not merge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
+
+    /// Updated output mapping (full replace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_mapping: Option<serde_json::Value>,
+
+    /// Updated workflow type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_type: Option<String>,
+
+    /// Updated price in USDC (only honored while unlisted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_usdc_per_call: Option<String>,
+}

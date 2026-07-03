@@ -41,7 +41,10 @@
 //! and the session is reused until it expires or the server returns 401.
 
 use crate::error::{Error, Result};
-use crate::types::{CallWorkflowResult, ExecutionDetail, SearchWorkflowsOptions, Workflow};
+use crate::types::{
+    CallWorkflowResult, CreateWorkflowOptions, Edge, ExecutionDetail, ListWorkflowOptions,
+    ListingUpdate, Node, SearchWorkflowsOptions, Workflow, WorkflowUpdate,
+};
 use crate::x402::parse_challenge;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -343,6 +346,231 @@ impl McpClient {
                     "execute_workflow({workflow_id}): response missing executionId; body: {text}"
                 ))
             })
+    }
+
+    /// Create a new workflow in the organization.
+    ///
+    /// Maps to the `create_workflow` MCP tool. Workflows are created
+    /// `enabled: false` by default (only matters for scheduled / event /
+    /// block / webhook triggers — manual triggers can be executed via
+    /// [`McpClient::execute_workflow`] regardless). Pass
+    /// `opts.enabled = Some(true)` if you want scheduled triggers to
+    /// fire immediately.
+    pub async fn create_workflow(
+        &self,
+        name: &str,
+        nodes: Vec<Node>,
+        edges: Vec<Edge>,
+        opts: CreateWorkflowOptions,
+    ) -> Result<Workflow> {
+        let mut args = serde_json::Map::new();
+        args.insert("name".to_string(), Value::String(name.to_string()));
+        if let Some(d) = &opts.description {
+            args.insert("description".to_string(), Value::String(d.clone()));
+        }
+        args.insert(
+            "nodes".to_string(),
+            serde_json::to_value(&nodes).map_err(|e| {
+                Error::Internal(format!("create_workflow: failed to serialize nodes: {e}"))
+            })?,
+        );
+        args.insert(
+            "edges".to_string(),
+            serde_json::to_value(&edges).map_err(|e| {
+                Error::Internal(format!("create_workflow: failed to serialize edges: {e}"))
+            })?,
+        );
+        if let Some(e) = opts.enabled {
+            args.insert("enabled".to_string(), Value::Bool(e));
+        }
+        if let Some(p) = &opts.project_id {
+            args.insert("projectId".to_string(), Value::String(p.clone()));
+        }
+        if let Some(t) = &opts.tag_id {
+            args.insert("tagId".to_string(), Value::String(t.clone()));
+        }
+        let text = self.tools_call_text("create_workflow", Value::Object(args)).await?;
+        parse_workflow(&text, "create_workflow")
+    }
+
+    /// Fetch a single workflow by ID, including its full node graph and
+    /// edges. Maps to the `get_workflow` MCP tool.
+    pub async fn get_workflow(&self, workflow_id: &str) -> Result<Workflow> {
+        let text = self
+            .tools_call_text("get_workflow", json!({ "workflowId": workflow_id }))
+            .await?;
+        parse_workflow(&text, "get_workflow")
+    }
+
+    /// Update an existing workflow's name, description, node graph,
+    /// edges, or enabled state. Maps to the `update_workflow` MCP tool.
+    ///
+    /// All fields in [`WorkflowUpdate`] are optional — only those that
+    /// are `Some` are sent. Note that `nodes` and `edges` are full
+    /// replacements, not partial patches.
+    pub async fn update_workflow(
+        &self,
+        workflow_id: &str,
+        update: WorkflowUpdate,
+    ) -> Result<Workflow> {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "workflowId".to_string(),
+            Value::String(workflow_id.to_string()),
+        );
+        // Merge the update fields. The struct is `#[serde(default,
+        // skip_serializing_if = "Option::is_none")]` on every field, so
+        // serializing it directly gives us just the set fields.
+        let update_value = serde_json::to_value(&update).map_err(|e| {
+            Error::Internal(format!(
+                "update_workflow: failed to serialize update: {e}"
+            ))
+        })?;
+        if let Value::Object(obj) = update_value {
+            for (k, v) in obj {
+                args.insert(k, v);
+            }
+        } else {
+            return Err(Error::Internal(format!(
+                "update_workflow: serialized update is not an object: {update_value}"
+            )));
+        }
+        let text = self
+            .tools_call_text("update_workflow", Value::Object(args))
+            .await?;
+        parse_workflow(&text, "update_workflow")
+    }
+
+    /// Publish a workflow to the KeeperHub marketplace.
+    ///
+    /// Maps to the `list_workflow` MCP tool. On first publish, `opts.slug`
+    /// is required and is **permanent** — the server does not let you
+    /// rename it later. On re-publish, the slug is preserved.
+    ///
+    /// **Important:** this method does **not** set the per-call price.
+    /// The `list_workflow` schema does not accept `priceUsdcPerCall`.
+    /// To set a price, use the KeeperHub UI's "Marketplace" button on
+    /// the workflow editor, or call `unlist_workflow` →
+    /// `update_workflow_listing` (with the price) → `list_workflow`
+    /// again. See [`McpClient::set_listing_price`] for the convenience
+    /// wrapper.
+    pub async fn list_workflow(
+        &self,
+        workflow_id: &str,
+        opts: ListWorkflowOptions,
+    ) -> Result<Workflow> {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "workflowId".to_string(),
+            Value::String(workflow_id.to_string()),
+        );
+        let opts_value = serde_json::to_value(&opts).map_err(|e| {
+            Error::Internal(format!(
+                "list_workflow: failed to serialize options: {e}"
+            ))
+        })?;
+        if let Value::Object(obj) = opts_value {
+            for (k, v) in obj {
+                args.insert(k, v);
+            }
+        } else {
+            return Err(Error::Internal(format!(
+                "list_workflow: serialized options is not an object: {opts_value}"
+            )));
+        }
+        let text = self
+            .tools_call_text("list_workflow", Value::Object(args))
+            .await?;
+        parse_workflow(&text, "list_workflow")
+    }
+
+    /// Remove a workflow from the marketplace catalog. The slug is
+    /// preserved for re-listing. Maps to the `unlist_workflow` MCP tool.
+    pub async fn unlist_workflow(&self, workflow_id: &str) -> Result<Workflow> {
+        let text = self
+            .tools_call_text(
+                "unlist_workflow",
+                json!({ "workflowId": workflow_id }),
+            )
+            .await?;
+        parse_workflow(&text, "unlist_workflow")
+    }
+
+    /// Edit listing metadata (description, category, chain, schemas,
+    /// **price**). Maps to the `update_workflow_listing` MCP tool.
+    ///
+    /// **Server quirk:** the `priceUsdcPerCall` field is only honored
+    /// while the workflow is unlisted. To change the price of a listed
+    /// workflow, see [`McpClient::set_listing_price`] for the safe
+    /// unlist/update/relist dance.
+    pub async fn update_workflow_listing(
+        &self,
+        workflow_id: &str,
+        update: ListingUpdate,
+    ) -> Result<Workflow> {
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "workflowId".to_string(),
+            Value::String(workflow_id.to_string()),
+        );
+        let update_value = serde_json::to_value(&update).map_err(|e| {
+            Error::Internal(format!(
+                "update_workflow_listing: failed to serialize update: {e}"
+            ))
+        })?;
+        if let Value::Object(obj) = update_value {
+            for (k, v) in obj {
+                args.insert(k, v);
+            }
+        } else {
+            return Err(Error::Internal(format!(
+                "update_workflow_listing: serialized update is not an object: {update_value}"
+            )));
+        }
+        let text = self
+            .tools_call_text("update_workflow_listing", Value::Object(args))
+            .await?;
+        parse_workflow(&text, "update_workflow_listing")
+    }
+
+    /// Read the public listing metadata for a workflow by its slug.
+    /// Maps to the `get_workflow_listing` MCP tool. **No auth required.**
+    pub async fn get_workflow_listing(&self, slug: &str) -> Result<Workflow> {
+        let text = self
+            .tools_call_text("get_workflow_listing", json!({ "slug": slug }))
+            .await?;
+        parse_workflow(&text, "get_workflow_listing")
+    }
+
+    /// Set a workflow's per-call USDC price.
+    ///
+    /// This is a convenience wrapper around the unlist → update_listing
+    /// (with price) → re-list dance that the server requires for price
+    /// changes. It returns the workflow object after re-listing.
+    ///
+    /// Use this when you want a fully programmatic path. The same
+    /// effect can be achieved in the UI: open the workflow, click
+    /// "Marketplace", set the price, save.
+    pub async fn set_listing_price(
+        &self,
+        workflow_id: &str,
+        price_usdc: &str,
+    ) -> Result<Workflow> {
+        // 1. Unlist (server quirk: price only takes effect on an
+        //    unlisted workflow).
+        self.unlist_workflow(workflow_id).await?;
+        // 2. Update the listing with the new price.
+        self.update_workflow_listing(
+            workflow_id,
+            ListingUpdate {
+                price_usdc_per_call: Some(price_usdc.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+        // 3. Re-list. The server preserves the existing slug.
+        self.list_workflow(workflow_id, ListWorkflowOptions::default())
+            .await
     }
 
     /// Initialize the MCP session (handshake).
@@ -667,6 +895,21 @@ fn unwrap_search_envelope(text: &str) -> Result<Vec<Workflow>> {
     serde_json::from_value(Value::Array(items.clone())).map_err(|e| {
         Error::Internal(format!(
             "search_workflows: failed to parse items as Vec<Workflow>: {e}; body: {text}"
+        ))
+    })
+}
+
+/// Parse a single-workflow response body into a [`Workflow`].
+///
+/// Used by every workflow-CRUD method (`create_workflow`, `get_workflow`,
+/// `update_workflow`, `list_workflow`, `unlist_workflow`,
+/// `update_workflow_listing`, `get_workflow_listing`). The body is
+/// the JSON-stringified workflow object inside the tools/call content
+/// envelope (already unwrapped by the caller).
+fn parse_workflow(text: &str, tool: &str) -> Result<Workflow> {
+    serde_json::from_str(text).map_err(|e| {
+        Error::Internal(format!(
+            "{tool}: failed to parse response as Workflow: {e}; body: {text}"
         ))
     })
 }
