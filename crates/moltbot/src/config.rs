@@ -73,10 +73,11 @@ fn default_safe_mode_threshold() -> f64 {
     5.0
 }
 
-/// Default wallet address — the KeeperHub org's creator wallet
-/// (Sepolia, Turnkey-managed). Used as `on_behalf_of` for Aave
-/// supplies and `to` for Aave withdrawals. Override per-environment
-/// for mainnet / Base / etc.
+/// Default wallet address — the KeeperHub org's creator wallet,
+/// Turnkey-managed. The same EOA exists on every EVM network;
+/// the default `network = "1"` (Ethereum mainnet) is what the
+/// config actually uses for the $5 demo. Originally provisioned
+/// on Sepolia for testing; override per-network for Base / etc.
 fn default_wallet_address() -> String {
     "0x54F9Fe5A1f63064fc083928df60A95db2dc2CE39".to_string()
 }
@@ -151,8 +152,10 @@ pub struct AgentConfig {
     pub safe_mode_threshold_usd: f64,
 
     /// Wallet address used as the `on_behalf_of` (supply) and `to`
-    /// (withdraw) for Aave V3 operations. Defaults to the org's
-    /// creator wallet on Sepolia. Override for mainnet / Base.
+    /// (withdraw) for Aave V3 operations. The default is the org's
+    /// Turnkey-managed creator EOA, paired with `network = "1"`
+    /// (Ethereum mainnet) for the $5 demo. The same address works
+    /// on any EVM network; override both for Base / Sepolia.
     #[serde(default = "default_wallet_address")]
     pub wallet_address: String,
 
