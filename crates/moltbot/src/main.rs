@@ -62,6 +62,7 @@ use crate::dashboard::DashboardState;
 use crate::job::JobRegistry;
 use crate::jobs::morpho_health::MorphoHealthJob;
 use crate::state::new_shared_state;
+use crate::telegram::Telegram;
 use crate::tick::AgentLoop;
 
 /// CLI argument shape. Kept tiny — the bulk of the config is TOML + env.
@@ -248,7 +249,34 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let loop_ = AgentLoop::new(state.clone(), client, Arc::clone(&config), jobs, audit_arc, None);
+    // Build the optional Telegram alerter. Constructed when both
+    // `telegram_bot_token` and `telegram_chat_id` are set and
+    // non-empty; `None` otherwise (the default config has no
+    // Telegram fields and the agent runs with no alerts). The
+    // loop's safe-mode Enter/Exit handlers short-circuit when
+    // `telegram.is_none()`, so the absence is a no-op.
+    let telegram = match (
+        config.telegram_bot_token.as_deref(),
+        config.telegram_chat_id.as_deref(),
+    ) {
+        (Some(t), Some(c)) if !t.is_empty() && !c.is_empty() => {
+            tracing::info!(
+                chat_id = c,
+                "telegram alerter enabled (safe-mode Enter/Exit will notify)"
+            );
+            Some(Arc::new(Telegram::new(t, c)))
+        }
+        _ => None,
+    };
+
+    let loop_ = AgentLoop::new(
+        state.clone(),
+        client,
+        Arc::clone(&config),
+        jobs,
+        audit_arc,
+        telegram,
+    );
     let _shutdown = loop_.shutdown_handle();
 
     let iterations = loop_.run().await;
